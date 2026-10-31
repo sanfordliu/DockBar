@@ -9,24 +9,27 @@ struct AppIconButton: View {
 
     var body: some View {
         let size = model.settings.effectiveIconSize
+        let pad: CGFloat = 5
         let offset = model.dragOffset(for: item, displayID: displayID)
-        VStack(spacing: 4) {
-            Image(nsImage: IconCache.shared.icon(for: item.path))
-                .resizable()
-                .interpolation(.high)
-                .frame(width: size, height: size)
-                .opacity(item.isRunning ? 1 : 0.55)
-            Capsule()
-                .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
-                .frame(width: item.isActive ? 16 : 4, height: 3)
-                .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
-        }
-        .frame(width: model.settings.iconStride, height: model.settings.barHeight - 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.primary.opacity(hovered ? 0.14 : 0))
-        )
-        .scaleEffect(hovered && model.dragID == nil ? 1.08 : 1)
+        Image(nsImage: IconCache.shared.icon(for: item.path))
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .opacity(item.isRunning ? 1 : 0.55)
+            .padding(pad)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(hovered ? 0.14 : 0))
+            )
+            .overlay(alignment: .bottom) {
+                Capsule()
+                    .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
+                    .frame(width: item.isActive ? 16 : 4, height: 3)
+                    .padding(.bottom, 1)
+                    .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
+            }
+            .frame(width: model.settings.iconStride, height: model.settings.barHeight - 6)
+            .scaleEffect(hovered && model.dragID == nil ? 1.08 : 1)
         .animation(.spring(duration: 0.22), value: hovered)
         .offset(x: offset)
         .animation(model.dragID == item.id ? .none : .spring(duration: 0.2), value: offset)

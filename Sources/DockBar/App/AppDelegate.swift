@@ -87,7 +87,6 @@ final class EventBridge: NSObject {
     @objc private func tick() {
         TaskbarModel.shared.refresh(clearance: true)
         ScreenManager.shared.bringForward()
-        ScreenManager.shared.resetCursorIfOverBar()
         tickCount += 1
         if tickCount.isMultiple(of: 3) {
             DockController.enforceHidden()

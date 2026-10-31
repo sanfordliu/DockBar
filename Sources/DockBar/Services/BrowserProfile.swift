@@ -6,33 +6,44 @@ import Foundation
 enum BrowserProfile {
     @MainActor
     static func stamp(_ windows: [WindowInfo], apps: [pid_t: LiveApp]) -> [WindowInfo] {
-        let live = Set(windows.map(\.ownerPID))
-        cache = cache.filter { live.contains($0.key) }
-        return windows.map { window in
+        windows.map { window in
             var copy = window
-            copy.profileName = name(bundleID: apps[window.ownerPID]?.bundleID, pid: window.ownerPID)
+            let app = apps[window.ownerPID]
+            copy.profileName = name(
+                bundleID: app?.bundleID,
+                pid: window.ownerPID,
+                title: window.title,
+                appName: app?.name
+            )
             return copy
         }
     }
 
+    /// Chrome often hosts every profile in one process, so the process arguments are not enough.
+    /// The window title carries the profile, as in "Inbox - Google Chrome - Ada (Work)".
     @MainActor
-    static func name(bundleID: String?, pid: pid_t) -> String? {
-        if let cached = cache[pid] { return cached }
+    static func name(bundleID: String?, pid: pid_t, title: String, appName: String?) -> String? {
         guard let bundleID, let folder = supportFolder(bundleID: bundleID) else { return nil }
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
-        guard let arguments = ProcessArguments.arguments(of: pid) else { return nil }
-        let resolved = name(
+        let arguments = ProcessArguments.arguments(of: pid) ?? []
+        return name(
             bundleID: bundleID,
             arguments: arguments,
-            supportRoot: root.appendingPathComponent(folder, isDirectory: true)
+            supportRoot: root.appendingPathComponent(folder, isDirectory: true),
+            windowTitle: title,
+            appName: appName
         )
-        if let resolved { cache[pid] = resolved }
-        return resolved
     }
 
     /// Resolves a profile label from already-loaded arguments and the browser's support directory.
-    static func name(bundleID: String?, arguments: [String], supportRoot: URL) -> String? {
+    static func name(
+        bundleID: String?,
+        arguments: [String],
+        supportRoot: URL,
+        windowTitle: String = "",
+        appName: String? = nil
+    ) -> String? {
         guard let bundleID else { return nil }
         if isFirefox(bundleID) {
             let ini = supportRoot.appendingPathComponent("profiles.ini")
@@ -43,8 +54,14 @@ enum BrowserProfile {
         guard let state = localStateData(in: supportRoot) else { return nil }
         let names = profileNames(in: state)
         guard names.count > 1 else { return nil }
-        let directory = profileDirectory(from: arguments) ?? "Default"
-        return names[directory]
+        if let directory = profileDirectory(from: arguments) {
+            return names[directory]
+        }
+        return profileLabel(
+            in: windowTitle,
+            tokens: titleTokens(in: state),
+            products: products(bundleID: bundleID, appName: appName)
+        )
     }
 
     static func supportFolder(bundleID: String) -> String? {
@@ -167,19 +184,12 @@ enum BrowserProfile {
     static func pageTitle(_ title: String, appName: String, profile: String?) -> String {
         var text = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return appName }
-        let productSuffixes = [
-            " - \(appName)",
-            " - Google Chrome",
-            " - Microsoft Edge",
-            " - Brave",
-            " - Vivaldi",
-            " - Opera",
-            " - Chromium",
-            " - Firefox",
-            " - Arc",
-        ]
-        for suffix in productSuffixes where text.hasSuffix(suffix) {
-            text = String(text.dropLast(suffix.count))
+        for product in products(bundleID: "", appName: appName) {
+            let marker = " - \(product)"
+            guard let range = text.range(of: marker, options: .backwards) else { continue }
+            let head = text[..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !head.isEmpty else { continue }
+            text = String(head)
             break
         }
         if let profile {
@@ -192,7 +202,77 @@ enum BrowserProfile {
         return trimmed.isEmpty ? appName : trimmed
     }
 
-    @MainActor private static var cache: [pid_t: String] = [:]
+    /// Maps a title fragment such as "Work" or "Ada (Work)" to the label shown in the preview.
+    static func profileLabel(in title: String, tokens: [String: String], products: [String]) -> String? {
+        let ordered = tokens.keys.sorted { $0.count > $1.count }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        for product in products {
+            let marker = " - \(product)"
+            guard let range = trimmed.range(of: marker, options: .backwards) else { continue }
+            var tail = trimmed[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if tail.hasPrefix("-") {
+                tail = tail.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !tail.isEmpty else { continue }
+            for token in ordered {
+                let wrapped = "(\(token))"
+                if tail == token || tail.hasSuffix(wrapped), let label = tokens[token], !label.isEmpty {
+                    return label
+                }
+            }
+        }
+        return nil
+    }
+
+    static func titleTokens(in localState: Data) -> [String: String] {
+        guard
+            let root = try? JSONSerialization.jsonObject(with: localState) as? [String: Any],
+            let profile = root["profile"] as? [String: Any],
+            let cache = profile["info_cache"] as? [String: Any]
+        else { return [:] }
+        var tokens: [String: String] = [:]
+        for (_, value) in cache {
+            guard let info = value as? [String: Any] else { continue }
+            let raw = (info["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let label = displayName(
+                name: info["name"] as? String,
+                userName: info["user_name"] as? String,
+                gaiaName: info["gaia_name"] as? String
+            ) else { continue }
+            if !raw.isEmpty { tokens[raw] = label }
+            tokens[label] = label
+        }
+        return tokens
+    }
+
+    static func products(bundleID: String, appName: String?) -> [String] {
+        var names: [String] = []
+        func add(_ name: String) {
+            guard !name.isEmpty, !names.contains(name) else { return }
+            names.append(name)
+        }
+        if let appName { add(appName) }
+        switch bundleID {
+        case "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary", "com.google.Chrome.dev":
+            add("Google Chrome")
+        case "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary":
+            add("Microsoft Edge")
+        case "com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.nightly":
+            add("Brave")
+        case "com.vivaldi.Vivaldi": add("Vivaldi")
+        case "com.operasoftware.Opera": add("Opera")
+        case "org.chromium.Chromium": add("Chromium")
+        case "company.thebrowser.Browser": add("Arc")
+        case "org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly":
+            add("Firefox")
+        default:
+            break
+        }
+        for fallback in ["Google Chrome", "Microsoft Edge", "Brave", "Vivaldi", "Opera", "Chromium", "Firefox", "Arc"] {
+            add(fallback)
+        }
+        return names
+    }
 
     private static func isFirefox(_ bundleID: String) -> Bool {
         bundleID == "org.mozilla.firefox"

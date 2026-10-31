@@ -537,6 +537,18 @@ struct DockBarTests {
         #expect(host.acceptsFirstMouse(for: nil))
 
         let panel = TaskbarPanel(frame: NSRect(x: screen.frame.maxX + 20, y: screen.frame.minY, width: 320, height: 48))
+        #expect(BarCursor.allowsRectsWhenInactive(panel))
+        let plain = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 48))
+        let arrow = BarCursor.arrowRect(in: plain)
+        let line = BarCursor.resizeLineRect(in: plain)
+        #expect(arrow == NSRect(x: 0, y: 0, width: 100, height: 42))
+        #expect(line == NSRect(x: 0, y: 42, width: 100, height: 6))
+        let flippedArrow = BarCursor.arrowRect(in: host)
+        let flippedLine = BarCursor.resizeLineRect(in: host)
+        #expect(flippedArrow.origin.y == BarCursor.resizeLine)
+        #expect(flippedArrow.height == host.bounds.height - BarCursor.resizeLine)
+        #expect(flippedLine.origin.y == 0)
+        #expect(flippedLine.height == BarCursor.resizeLine)
         panel.install(host)
         panel.orderFrontRegardless()
         BarHitShape.apply(to: panel)
@@ -652,6 +664,32 @@ struct DockBarTests {
             supportRoot: root
         )
         #expect(work == "Work")
+        let tokens = BrowserProfile.titleTokens(in: state)
+        #expect(BrowserProfile.profileLabel(
+            in: "Inbox - Google Chrome - Ada (Work)",
+            tokens: tokens,
+            products: ["Google Chrome"]
+        ) == "Work")
+        #expect(BrowserProfile.profileLabel(
+            in: "Notes - Google Chrome - Ada (Personal)",
+            tokens: tokens,
+            products: ["Google Chrome"]
+        ) == "Personal")
+        #expect(BrowserProfile.profileLabel(in: "Notes (Personal)", tokens: tokens, products: ["Google Chrome"]) == nil)
+        #expect(BrowserProfile.name(
+            bundleID: "com.google.Chrome",
+            arguments: ["Google Chrome"],
+            supportRoot: root,
+            windowTitle: "Board - Google Chrome - Ada (Personal)",
+            appName: "Google Chrome"
+        ) == "Personal")
+        #expect(BrowserProfile.name(
+            bundleID: "com.google.Chrome",
+            arguments: ["Google Chrome"],
+            supportRoot: root,
+            windowTitle: "Inbox - Google Chrome",
+            appName: "Google Chrome"
+        ) == nil)
         let only = Data("""
         {"profile":{"info_cache":{"Default":{"name":"Personal"}}}}
         """.utf8)
@@ -682,6 +720,11 @@ struct DockBarTests {
 
         #expect(BrowserProfile.pageTitle(
             "Inbox - Work - Google Chrome",
+            appName: "Google Chrome",
+            profile: "Work"
+        ) == "Inbox")
+        #expect(BrowserProfile.pageTitle(
+            "Inbox - Google Chrome - Ada (Work)",
             appName: "Google Chrome",
             profile: "Work"
         ) == "Inbox")

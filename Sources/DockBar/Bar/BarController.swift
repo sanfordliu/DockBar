@@ -24,6 +24,7 @@ final class BarController {
         panel.level = BarWindows.barLevel
         panel.collectionBehavior = BarWindows.overlayBehavior
         panel.orderFrontRegardless()
+        BarCursor.claim(panel)
         BarHitShape.apply(to: panel)
     }
 }

@@ -2,13 +2,100 @@ import AppKit
 import Darwin
 import SwiftUI
 
+@MainActor
 enum BarCursor {
     static let trackingOptions: NSTrackingArea.Options = [
         .mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeAlways, .inVisibleRect,
     ]
 
+    /// Cursor rects are ignored while DockBar is in the background, so the resize
+    /// cursor from the window above the bar stays put. This lets the bar replace it.
+    static func claim(_ window: NSWindow) {
+        setBool(window, "setAllowsCursorRectsWhenInactive:", true)
+        if let view = window.contentView {
+            window.invalidateCursorRects(for: view)
+        }
+    }
+
+    static func allowsRectsWhenInactive(_ window: NSWindow) -> Bool {
+        bool(window, "allowsCursorRectsWhenInactive")
+    }
+
+    static func installRects(on view: NSView) {
+        let arrow = arrowRect(in: view)
+        if arrow.width > 0, arrow.height > 0 { view.addCursorRect(arrow, cursor: .arrow) }
+        let line = resizeLineRect(in: view)
+        if line.width > 0, line.height > 0 { view.addCursorRect(line, cursor: verticalResize) }
+    }
+
+    /// The window's bottom resize line overlaps the top of the bar.
+    static let resizeLine: CGFloat = 6
+
+    /// Hosting views are flipped, so a shorter rect would keep the top and drop the bottom.
+    static func arrowRect(in view: NSView) -> CGRect {
+        var rect = view.bounds
+        guard rect.height > resizeLine else { return .zero }
+        if view.isFlipped {
+            rect.origin.y += resizeLine
+        }
+        rect.size.height -= resizeLine
+        return rect
+    }
+
+    static func resizeLineRect(in view: NSView) -> CGRect {
+        var rect = view.bounds
+        guard rect.height > resizeLine else { return .zero }
+        rect.size.height = resizeLine
+        if !view.isFlipped {
+            rect.origin.y = view.bounds.maxY - resizeLine
+        }
+        return rect
+    }
+
+    static var verticalResize: NSCursor {
+        let selector = NSSelectorFromString("_windowResizeNorthSouthCursor")
+        guard NSCursor.responds(to: selector) else { return .resizeUpDown }
+        let implementation = unsafeBitCast(
+            NSCursor.method(for: selector),
+            to: (@convention(c) (AnyClass, Selector) -> Unmanaged<NSCursor>).self
+        )
+        return implementation(NSCursor.self, selector).takeUnretainedValue()
+    }
+
     static func useArrow() {
-        NSCursor.arrow.set()
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        switch ScreenManager.shared.cursorIntent(at: NSEvent.mouseLocation) {
+        case .arrow:
+            NSCursor.arrow.set()
+        case .resize:
+            verticalResize.set()
+        case .none:
+            break
+        }
+    }
+
+    static func allowBackgroundCursor() {
+        SkyLight.allowBackgroundCursor()
+    }
+
+    private static func setBool(_ window: NSWindow, _ name: String, _ value: Bool) {
+        let selector = NSSelectorFromString(name)
+        guard window.responds(to: selector) else { return }
+        let implementation = unsafeBitCast(
+            window.method(for: selector),
+            to: (@convention(c) (AnyObject, Selector, Bool) -> Void).self
+        )
+        implementation(window, selector, value)
+    }
+
+    private static func bool(_ window: NSWindow, _ name: String) -> Bool {
+        let selector = NSSelectorFromString(name)
+        guard window.responds(to: selector) else { return false }
+        let implementation = unsafeBitCast(
+            window.method(for: selector),
+            to: (@convention(c) (AnyObject, Selector) -> Bool).self
+        )
+        return implementation(window, selector)
     }
 }
 
@@ -30,12 +117,24 @@ private enum SkyLight {
         let set = unsafeBitCast(setter, to: (@convention(c) (Int32, Int32, CFTypeRef) -> Int32).self)
         return set(connectionID, window, region)
     }
+
+    static func allowBackgroundCursor() {
+        guard let handle,
+              let connection = dlsym(handle, "SLSMainConnectionID"),
+              let setter = dlsym(handle, "SLSSetConnectionProperty") else { return }
+        let connectionID = unsafeBitCast(connection, to: (@convention(c) () -> Int32).self)()
+        let set = unsafeBitCast(
+            setter,
+            to: (@convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32).self
+        )
+        _ = set(connectionID, connectionID, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    }
 }
 
 @MainActor
 enum BarHitShape {
-    /// The window server ignores nearly clear pixels when choosing the cursor.
-    /// A full opaque shape makes the bar the hit target for its whole frame.
+    /// Nearly clear pixels are not a hit target. A full opaque shape makes the
+    /// whole bar receive clicks.
     static func apply(to window: NSWindow) {
         guard window.windowNumber > 0 else { return }
         var rect = CGRect(origin: .zero, size: window.frame.size)
@@ -82,7 +181,7 @@ final class BarContentView: NSView {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .arrow)
+        BarCursor.installRects(on: self)
     }
 
     override func updateTrackingAreas() {
@@ -142,7 +241,7 @@ final class ClearHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .arrow)
+        BarCursor.installRects(on: self)
     }
 
     override func updateTrackingAreas() {
@@ -205,6 +304,7 @@ final class TaskbarPanel: NSPanel {
         acceptsMouseMovedEvents = true
         animationBehavior = .none
         title = "DockBar"
+        BarCursor.claim(self)
         let content = BarContentView(frame: frame)
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
@@ -215,12 +315,6 @@ final class TaskbarPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
-        switch event.type {
-        case .mouseMoved, .mouseEntered, .cursorUpdate, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            BarCursor.useArrow()
-        default:
-            break
-        }
         if event.type == .rightMouseDown, let content = contentView {
             let hit = content.hitTest(event.locationInWindow)
             if !BarContextMenu.isInteractive(hit) {

@@ -8,6 +8,7 @@ final class ScreenManager: NSObject {
     private var cursorTimer: Timer?
 
     func start() {
+        BarCursor.allowBackgroundCursor()
         layout()
         installCursorTimer()
         NotificationCenter.default.addObserver(
@@ -40,14 +41,33 @@ final class ScreenManager: NSObject {
         }
     }
 
+    enum CursorIntent {
+        case arrow, resize, none
+    }
+
+    /// Below the resize line the bar uses the arrow. On the line, and a few points above it, keep the vertical resize cursor.
+    func cursorIntent(at point: CGPoint) -> CursorIntent {
+        for bar in bars.values {
+            let frame = bar.panel.frame
+            guard point.x >= frame.minX, point.x < frame.maxX else { continue }
+            let gap = frame.maxY - point.y
+            if gap > BarCursor.resizeLine, gap <= frame.height {
+                return .arrow
+            }
+            if gap >= -BarCursor.resizeLine, gap <= BarCursor.resizeLine {
+                return .resize
+            }
+        }
+        return .none
+    }
+
     func bringForward() {
         for bar in bars.values {
             bar.bringForward()
         }
     }
 
-    func resetCursorIfOverBar(at point: CGPoint = NSEvent.mouseLocation) {
-        guard bars.values.contains(where: { $0.panel.frame.contains(point) }) else { return }
+    func resetCursorIfOverBar() {
         BarCursor.useArrow()
     }
 
