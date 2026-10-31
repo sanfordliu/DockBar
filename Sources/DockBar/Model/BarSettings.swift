@@ -48,6 +48,10 @@ final class BarSettings {
     var showTrash: Bool {
         didSet { persist() }
     }
+    /// Move a window onto the display whose DockBar button was clicked.
+    var openWindowsOnClickedDisplay: Bool {
+        didSet { persist() }
+    }
 
     /// Icon drawn in the bar. Stays inside the chosen bar height.
     var effectiveIconSize: CGFloat { min(iconSize, Self.maximumIconSize(for: barHeight)) }
@@ -88,6 +92,11 @@ final class BarSettings {
         } else {
             showTrash = defaults.bool(forKey: "showTrash")
         }
+        if defaults.object(forKey: "openWindowsOnClickedDisplay") == nil {
+            openWindowsOnClickedDisplay = true
+        } else {
+            openWindowsOnClickedDisplay = defaults.bool(forKey: "openWindowsOnClickedDisplay")
+        }
         ready = true
     }
 
@@ -100,6 +109,7 @@ final class BarSettings {
         defaults.set(showPinnedOnAllScreens, forKey: "showPinnedOnAllScreens")
         defaults.set(showFinder, forKey: "showFinder")
         defaults.set(showTrash, forKey: "showTrash")
+        defaults.set(openWindowsOnClickedDisplay, forKey: "openWindowsOnClickedDisplay")
         onChange?()
     }
 }

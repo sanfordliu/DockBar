@@ -26,24 +26,21 @@ private struct SettingsForm: View {
                         }
                     }
                     LabeledContent("Bar height") {
-                        Text("\(Int(settings.barHeight)) pt")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $settings.barHeight, in: 40...72, step: 2) {
-                        Text("Bar height")
+                        Slider(value: $settings.barHeight, in: 40...72, step: 2)
                     }
                     LabeledContent("Icon size") {
-                        Text("\(Int(settings.iconSize)) pt")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $settings.iconSize, in: 16...BarSettings.maximumIconSize(for: settings.barHeight), step: 2) {
-                        Text("Icon size")
+                        Slider(value: $settings.iconSize, in: 16...BarSettings.maximumIconSize(for: settings.barHeight), step: 2)
                     }
                     Toggle("Show pinned apps on every screen", isOn: $settings.showPinnedOnAllScreens)
-                    Toggle("Show Finder as the first icon", isOn: $settings.showFinder)
+                    Toggle("Show Finder", isOn: $settings.showFinder)
                     Toggle("Show Trash", isOn: $settings.showTrash)
+                }
+
+                Section("Windows") {
+                    Toggle("Open on the clicked display", isOn: $settings.openWindowsOnClickedDisplay)
+                    Text("Windows open on the display where you clicked the DockBar button. Turn this off to leave them where macOS puts them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Permissions") {

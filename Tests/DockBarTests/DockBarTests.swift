@@ -26,6 +26,7 @@ struct DockBarTests {
         #expect(settings.showFinder)
         #expect(settings.showTrash)
         #expect(settings.showPinnedOnAllScreens)
+        #expect(settings.openWindowsOnClickedDisplay)
         #expect(settings.bottomGap == 0)
         #expect(settings.trashSlot == settings.effectiveIconSize + 36)
         #expect(IconAlignment.center.label == "Center")
@@ -39,6 +40,7 @@ struct DockBarTests {
         settings.showFinder = false
         settings.showTrash = false
         settings.showPinnedOnAllScreens = false
+        settings.openWindowsOnClickedDisplay = false
         #expect(settings.iconSize <= BarSettings.maximumIconSize(for: 40))
         #expect(settings.bottomGap == 6)
         #expect(settings.occupiedHeight == 46)
@@ -51,6 +53,7 @@ struct DockBarTests {
         #expect(!again.showFinder)
         #expect(!again.showTrash)
         #expect(!again.showPinnedOnAllScreens)
+        #expect(!again.openWindowsOnClickedDisplay)
 
         defaults.set(10, forKey: "barHeight")
         defaults.set(0, forKey: "iconSize")
@@ -257,6 +260,9 @@ struct DockBarTests {
             id: "idle", name: "Idle", path: textEditPath, bundleID: "com.apple.TextEdit",
             pid: 0, isPinned: false, isRunning: true, windowsOnScreen: [], isActive: false
         )
+        model.settings.openWindowsOnClickedDisplay = false
+        model.primaryClick(idle, displayID: screen.displayID, anchor: .zero)
+        model.settings.openWindowsOnClickedDisplay = true
         model.primaryClick(idle, displayID: screen.displayID, anchor: .zero)
         model.quit(AppItem(
             id: "ghost", name: "Ghost", path: textEditPath, bundleID: nil, pid: 999_999,
@@ -347,6 +353,15 @@ struct DockBarTests {
         #expect(full.width == screen.frame.width)
         model.settings.style = .floating
         let floating = model.panelFrame(for: screen)
+        let floatingRow = model.entries(for: screen.displayID)
+        let contentWidth = BarLayout.floatingWidth(
+            itemCount: floatingRow.count,
+            settings: model.settings,
+            showsFinderDivider: floatingRow.contains {
+                $0.isPinned && model.settings.showFinder && $0.bundleID == TaskbarModel.finderBundleID
+            }
+        )
+        #expect(floating.width == min(screen.frame.width - 24, contentWidth))
         #expect(floating.width < screen.frame.width)
         #expect(floating.minY == screen.frame.minY + model.settings.bottomGap)
 
@@ -550,6 +565,10 @@ struct DockBarTests {
         #expect(flippedLine.origin.y == 0)
         #expect(flippedLine.height == BarCursor.resizeLine)
         panel.install(host)
+        panel.applyChrome(floating: true)
+        #expect(panel.backgroundColor?.alphaComponent == 0)
+        panel.applyChrome(floating: false)
+        #expect((panel.backgroundColor?.alphaComponent ?? 0) > 0)
         panel.orderFrontRegardless()
         BarHitShape.apply(to: panel)
         if let moved = NSEvent.mouseEvent(
@@ -735,6 +754,7 @@ struct DockBarTests {
         let two = PreviewLayout.width(windowCount: 2)
         #expect(one == PreviewLayout.outerPadding * 2 + PreviewLayout.cardWidth)
         #expect(two - one == PreviewLayout.cardWidth + PreviewLayout.cardGap)
+        #expect(PreviewLayout.size(windowCount: 1, showsProfile: false, maxWidth: 2000).width == one)
         let plain = PreviewLayout.size(windowCount: 2, showsProfile: false, maxWidth: 2000)
         let labeled = PreviewLayout.size(windowCount: 2, showsProfile: true, maxWidth: 2000)
         #expect(labeled.height > plain.height)

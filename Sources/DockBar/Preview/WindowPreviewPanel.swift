@@ -208,7 +208,7 @@ enum PreviewLayout {
     static func size(windowCount: Int, showsProfile: Bool, maxWidth: CGFloat) -> CGSize {
         if windowCount == 0 { return CGSize(width: 240, height: 72) }
         let natural = width(windowCount: windowCount)
-        return CGSize(width: min(max(natural, 240), maxWidth), height: height(showsProfile: showsProfile))
+        return CGSize(width: min(natural, maxWidth), height: height(showsProfile: showsProfile))
     }
 }
 

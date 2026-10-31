@@ -12,7 +12,7 @@ struct TrashButton: View {
             .resizable()
             .interpolation(.high)
             .frame(width: size, height: size)
-            .padding(4)
+            .padding(BarLayout.trashInset)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(hovered || targeted || model.trashDragHover ? 0.16 : 0))

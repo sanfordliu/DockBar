@@ -35,8 +35,12 @@ final class TaskbarModel {
 
     func start() {
         settings.onChange = { [weak self] in
-            self?.recompute()
-            self?.scheduleFit()
+            guard let self else { return }
+            if !self.settings.openWindowsOnClickedDisplay {
+                self.steerTask?.cancel()
+            }
+            self.recompute()
+            self.scheduleFit()
         }
         loadPins()
         refresh(clearance: false)
@@ -83,11 +87,10 @@ final class TaskbarModel {
             return CGRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: height)
         case .floating:
             let row = entries(for: screen.displayID)
-            let count = max(row.count, 1)
-            let finderDivider: CGFloat = row.contains(where: { $0.isPinned && settings.showFinder && $0.bundleID == Self.finderBundleID }) ? 17 : 0
+            let showsFinderDivider = row.contains { $0.isPinned && settings.showFinder && $0.bundleID == Self.finderBundleID }
             let width = min(
                 screen.frame.width - 24,
-                CGFloat(count) * settings.iconStride + settings.trashSlot + finderDivider + 28
+                BarLayout.floatingWidth(itemCount: row.count, settings: settings, showsFinderDivider: showsFinderDivider)
             )
             return CGRect(
                 x: screen.frame.midX - width / 2,
@@ -500,6 +503,7 @@ final class TaskbarModel {
     /// Watches for the app's window and moves it onto the screen that was clicked.
     private func steerApp(pid: pid_t, onto displayID: CGDirectDisplayID, previous: Set<CGWindowID>, moveExisting: Bool) {
         steerTask?.cancel()
+        guard settings.openWindowsOnClickedDisplay else { return }
         steerTask = Task { @MainActor in
             let pauses: [Duration] = [
                 .milliseconds(200), .milliseconds(300), .milliseconds(400),
@@ -507,7 +511,7 @@ final class TaskbarModel {
             ]
             for pause in pauses {
                 try? await Task.sleep(for: pause)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.settings.openWindowsOnClickedDisplay else { return }
                 self.refresh(clearance: false)
                 if self.placeWindow(pid: pid, on: displayID, previous: previous, moveExisting: moveExisting) {
                     return

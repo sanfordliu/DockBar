@@ -282,6 +282,9 @@ enum BarWindows {
 }
 
 final class TaskbarPanel: NSPanel {
+    private var materialView: NSVisualEffectView?
+    private weak var hostingView: NSView?
+
     init(frame: NSRect) {
         super.init(
             contentRect: frame,
@@ -291,6 +294,7 @@ final class TaskbarPanel: NSPanel {
         )
         isOpaque = false
         // Enough alpha that the window server hit-tests the bar instead of the window behind it.
+        // The floating capsule clears this so the square window does not show past the glass.
         backgroundColor = NSColor.black.withAlphaComponent(0.12)
         hasShadow = false
         ignoresMouseEvents = false
@@ -333,12 +337,14 @@ final class TaskbarPanel: NSPanel {
         effect.state = .active
         effect.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(effect)
+        materialView = effect
 
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.wantsLayer = true
         hosting.layer?.isOpaque = false
         hosting.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
         content.addSubview(hosting)
+        hostingView = hosting
         NSLayoutConstraint.activate([
             effect.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             effect.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -349,6 +355,21 @@ final class TaskbarPanel: NSPanel {
             hosting.topAnchor.constraint(equalTo: content.topAnchor),
             hosting.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
+    }
+
+    /// The floating bar is a glass capsule. A square fill or blur behind it shows in the corners.
+    func applyChrome(floating: Bool) {
+        let tint = floating ? NSColor.clear : NSColor.black.withAlphaComponent(0.12)
+        backgroundColor = tint
+        hasShadow = floating
+        if let content = contentView {
+            content.wantsLayer = true
+            content.layer?.backgroundColor = tint.cgColor
+            content.layer?.cornerRadius = floating ? content.bounds.height / 2 : 0
+            content.layer?.masksToBounds = floating
+        }
+        materialView?.isHidden = floating
+        hostingView?.layer?.backgroundColor = tint.cgColor
     }
 }
 
