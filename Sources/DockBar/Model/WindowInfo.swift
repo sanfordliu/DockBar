@@ -1,6 +1,13 @@
 import CoreGraphics
 import Foundation
 
+/// Chromium profile highlight, stored as opaque RGB. Chrome writes this as an SkColor.
+struct ProfileTint: Equatable, Sendable {
+    var red: Double
+    var green: Double
+    var blue: Double
+}
+
 struct WindowInfo: Identifiable, Equatable, Sendable {
     var id: CGWindowID { windowID }
     var windowID: CGWindowID
@@ -15,6 +22,8 @@ struct WindowInfo: Identifiable, Equatable, Sendable {
     var isOnScreen: Bool
     /// Browser profile this window belongs to, when the app has more than one.
     var profileName: String? = nil
+    /// Color chosen for that profile in Chrome or another Chromium browser.
+    var profileTint: ProfileTint? = nil
 }
 
 struct CGWindowRecord: Sendable {

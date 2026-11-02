@@ -52,10 +52,31 @@ final class BarSettings {
     var openWindowsOnClickedDisplay: Bool {
         didSet { persist() }
     }
+    /// One icon per app. Off means one icon per window.
+    var groupWindows: Bool {
+        didSet { persist() }
+    }
+    /// Window title beside the icon, with a Chrome profile subtitle when there is one.
+    var showWindowLabels: Bool {
+        didSet { persist() }
+    }
 
     /// Icon drawn in the bar. Stays inside the chosen bar height.
     var effectiveIconSize: CGFloat { min(iconSize, Self.maximumIconSize(for: barHeight)) }
+    /// Width of the title beside an icon.
+    static let labelWidth: CGFloat = 118
+    /// Closed pins stay this wide. Open windows add the label beside the icon.
     var iconStride: CGFloat { effectiveIconSize + 10 }
+    var labeledButtonWidth: CGFloat { iconStride + Self.labelWidth + 6 }
+
+    /// Labels follow open windows on this screen. A pinned app with nothing open stays an icon.
+    func showsLabel(for item: AppItem) -> Bool {
+        showWindowLabels && !item.windowsOnScreen.isEmpty
+    }
+
+    func buttonWidth(for item: AppItem) -> CGFloat {
+        showsLabel(for: item) ? labeledButtonWidth : iconStride
+    }
     var bottomGap: CGFloat { style == .floating ? 6 : 0 }
     var occupiedHeight: CGFloat { barHeight + bottomGap }
     var trashSlot: CGFloat { showTrash ? effectiveIconSize + 36 : 0 }
@@ -97,6 +118,16 @@ final class BarSettings {
         } else {
             openWindowsOnClickedDisplay = defaults.bool(forKey: "openWindowsOnClickedDisplay")
         }
+        if defaults.object(forKey: "groupWindows") == nil {
+            groupWindows = true
+        } else {
+            groupWindows = defaults.bool(forKey: "groupWindows")
+        }
+        if defaults.object(forKey: "showWindowLabels") == nil {
+            showWindowLabels = false
+        } else {
+            showWindowLabels = defaults.bool(forKey: "showWindowLabels")
+        }
         ready = true
     }
 
@@ -110,6 +141,8 @@ final class BarSettings {
         defaults.set(showFinder, forKey: "showFinder")
         defaults.set(showTrash, forKey: "showTrash")
         defaults.set(openWindowsOnClickedDisplay, forKey: "openWindowsOnClickedDisplay")
+        defaults.set(groupWindows, forKey: "groupWindows")
+        defaults.set(showWindowLabels, forKey: "showWindowLabels")
         onChange?()
     }
 }

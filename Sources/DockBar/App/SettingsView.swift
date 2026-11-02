@@ -38,6 +38,14 @@ private struct SettingsForm: View {
                 }
 
                 Section("Windows") {
+                    Toggle("Group app windows", isOn: $settings.groupWindows)
+                    Text("One icon per app. Each window gets its own icon when grouping is off.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle("Show window labels", isOn: $settings.showWindowLabels)
+                    Text("Window title beside an open app. Closed pins stay icons. A Chrome profile appears underneath.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle("Open on the clicked display", isOn: $settings.openWindowsOnClickedDisplay)
                     Text("Windows open on the display where you clicked the DockBar button. Turn this off to leave them where macOS puts them.")
                         .font(.caption)
@@ -73,7 +81,7 @@ private struct SettingsForm: View {
             }
             .formStyle(.grouped)
         }
-        .frame(width: 560, height: 640)
+        .frame(width: 560, height: 720)
         .onAppear { loginStatus = SMAppService.mainApp.status }
     }
 

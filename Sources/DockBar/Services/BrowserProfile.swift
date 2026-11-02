@@ -20,8 +20,19 @@ enum BrowserProfile {
 
     private struct ChromiumEntry {
         var data: Data
+        var profiles: ChromiumProfiles
+    }
+
+    private struct ChromiumProfiles {
         var names: [String: String]
         var tokens: [String: String]
+        var colors: [String: ProfileTint]
+        var labelColors: [String: ProfileTint]
+    }
+
+    struct ProfileMark: Equatable {
+        var name: String?
+        var tint: ProfileTint?
     }
 
     private struct FirefoxEntry {
@@ -44,13 +55,15 @@ enum BrowserProfile {
             var copy = window
             let app = apps[window.ownerPID]
             guard let bundleID = app?.bundleID, let root = supportRoot(bundleID: bundleID) else { return copy }
-            copy.profileName = name(
+            let marked = mark(
                 bundleID: bundleID,
                 arguments: arguments(for: window.ownerPID),
                 supportRoot: root,
                 windowTitle: window.title,
                 appName: app?.name
             )
+            copy.profileName = marked.name
+            copy.profileTint = marked.tint
             return copy
         }
         let seen = Set(windows.map(\.ownerPID))
@@ -106,23 +119,52 @@ enum BrowserProfile {
         windowTitle: String = "",
         appName: String? = nil
     ) -> String? {
-        guard let bundleID else { return nil }
+        mark(
+            bundleID: bundleID,
+            arguments: arguments,
+            supportRoot: supportRoot,
+            windowTitle: windowTitle,
+            appName: appName
+        ).name
+    }
+
+    /// Profile label plus the color Chromium stored for that profile.
+    ///
+    /// Chrome writes the chosen color into `Local State` under `profile.info_cache.<directory>`
+    /// as SkColor integers (`0xAARRGGBB`, often negative in JSON). `profile_highlight_color` is the
+    /// color Chrome paints, with `default_avatar_fill_color` and `profile_color_seed` as fallbacks.
+    /// The same file shape is shared by Edge, Brave, Vivaldi, Opera, Arc, and Chromium.
+    static func mark(
+        bundleID: String?,
+        arguments: [String],
+        supportRoot: URL,
+        windowTitle: String = "",
+        appName: String? = nil
+    ) -> ProfileMark {
+        guard let bundleID else { return ProfileMark(name: nil, tint: nil) }
         if isFirefox(bundleID) {
             let ini = supportRoot.appendingPathComponent("profiles.ini")
-            guard let text = cachedFirefoxIni(at: ini) else { return nil }
-            return firefoxName(arguments: arguments, profilesIni: text)
+            guard let text = cachedFirefoxIni(at: ini) else { return ProfileMark(name: nil, tint: nil) }
+            return ProfileMark(name: firefoxName(arguments: arguments, profilesIni: text), tint: nil)
         }
-        guard supportFolder(bundleID: bundleID) != nil else { return nil }
-        guard let profiles = cachedChromiumProfiles(in: supportRoot) else { return nil }
-        guard profiles.names.count > 1 else { return nil }
+        guard supportFolder(bundleID: bundleID) != nil else { return ProfileMark(name: nil, tint: nil) }
+        guard let profiles = cachedChromiumProfiles(in: supportRoot) else { return ProfileMark(name: nil, tint: nil) }
         if let directory = profileDirectory(from: arguments) {
-            return profiles.names[directory]
+            let label = profiles.names.count > 1 ? profiles.names[directory] : nil
+            return ProfileMark(name: label, tint: profiles.colors[directory])
         }
-        return profileLabel(
-            in: windowTitle,
-            tokens: profiles.tokens,
-            products: products(bundleID: bundleID, appName: appName)
-        )
+        if profiles.names.count > 1,
+           let label = profileLabel(
+               in: windowTitle,
+               tokens: profiles.tokens,
+               products: products(bundleID: bundleID, appName: appName)
+           ) {
+            return ProfileMark(name: label, tint: profiles.labelColors[label])
+        }
+        if profiles.names.count == 1 {
+            return ProfileMark(name: nil, tint: profiles.colors.values.first)
+        }
+        return ProfileMark(name: nil, tint: nil)
     }
 
     static func supportFolder(bundleID: String) -> String? {
@@ -163,11 +205,7 @@ enum BrowserProfile {
     }
 
     static func profileNames(in localState: Data) -> [String: String] {
-        guard
-            let root = try? JSONSerialization.jsonObject(with: localState) as? [String: Any],
-            let profile = root["profile"] as? [String: Any],
-            let cache = profile["info_cache"] as? [String: Any]
-        else { return [:] }
+        guard let cache = infoCache(in: localState) else { return [:] }
         var names: [String: String] = [:]
         for (directory, value) in cache {
             guard let info = value as? [String: Any] else { continue }
@@ -180,6 +218,46 @@ enum BrowserProfile {
             }
         }
         return names
+    }
+
+    /// Profile directory to the color Chrome stored for it. Highlight wins, then avatar fill, then the seed.
+    static func profileColors(in localState: Data) -> [String: ProfileTint] {
+        guard let cache = infoCache(in: localState) else { return [:] }
+        var colors: [String: ProfileTint] = [:]
+        for (directory, value) in cache {
+            guard let info = value as? [String: Any], let tint = profileTint(in: info) else { continue }
+            colors[directory] = tint
+        }
+        return colors
+    }
+
+    /// Decodes a Chromium SkColor JSON number. Fully transparent values are ignored.
+    static func profileTint(skColor value: Any?) -> ProfileTint? {
+        guard let number = value as? NSNumber else { return nil }
+        let bits = UInt32(bitPattern: Int32(truncatingIfNeeded: number.int64Value))
+        let alpha = (bits >> 24) & 0xFF
+        guard alpha > 8 else { return nil }
+        return ProfileTint(
+            red: Double((bits >> 16) & 0xFF) / 255,
+            green: Double((bits >> 8) & 0xFF) / 255,
+            blue: Double(bits & 0xFF) / 255
+        )
+    }
+
+    private static func profileTint(in info: [String: Any]) -> ProfileTint? {
+        for key in ["profile_highlight_color", "default_avatar_fill_color", "profile_color_seed"] {
+            if let tint = profileTint(skColor: info[key]) { return tint }
+        }
+        return nil
+    }
+
+    private static func infoCache(in localState: Data) -> [String: Any]? {
+        guard
+            let root = try? JSONSerialization.jsonObject(with: localState) as? [String: Any],
+            let profile = root["profile"] as? [String: Any],
+            let cache = profile["info_cache"] as? [String: Any]
+        else { return nil }
+        return cache
     }
 
     static func displayName(name: String?, userName: String?, gaiaName: String?) -> String? {
@@ -286,11 +364,7 @@ enum BrowserProfile {
     }
 
     static func titleTokens(in localState: Data) -> [String: String] {
-        guard
-            let root = try? JSONSerialization.jsonObject(with: localState) as? [String: Any],
-            let profile = root["profile"] as? [String: Any],
-            let cache = profile["info_cache"] as? [String: Any]
-        else { return [:] }
+        guard let cache = infoCache(in: localState) else { return [:] }
         var tokens: [String: String] = [:]
         for (_, value) in cache {
             guard let info = value as? [String: Any] else { continue }
@@ -352,23 +426,37 @@ enum BrowserProfile {
         return nil
     }
 
-    private static func cachedChromiumProfiles(in directory: URL) -> (names: [String: String], tokens: [String: String])? {
+    private static func cachedChromiumProfiles(in directory: URL) -> ChromiumProfiles? {
         guard let data = localStateData(in: directory) else { return nil }
         let key = directory.path
         store.lock.lock()
         if let cached = store.chromium[key], cached.data == data {
-            let names = cached.names
-            let tokens = cached.tokens
+            let profiles = cached.profiles
             store.lock.unlock()
-            return (names, tokens)
+            return profiles
         }
         store.lock.unlock()
+        let profiles = chromiumProfiles(in: data)
+        store.lock.lock()
+        store.chromium[key] = ChromiumEntry(data: data, profiles: profiles)
+        store.lock.unlock()
+        return profiles
+    }
+
+    private static func chromiumProfiles(in data: Data) -> ChromiumProfiles {
         let names = profileNames(in: data)
         let tokens = titleTokens(in: data)
-        store.lock.lock()
-        store.chromium[key] = ChromiumEntry(data: data, names: names, tokens: tokens)
-        store.lock.unlock()
-        return (names, tokens)
+        let colors = profileColors(in: data)
+        var labelColors: [String: ProfileTint] = [:]
+        if let cache = infoCache(in: data) {
+            for (directory, value) in cache {
+                guard let info = value as? [String: Any], let tint = colors[directory] else { continue }
+                let raw = (info["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !raw.isEmpty { labelColors[raw] = tint }
+                if let label = names[directory] { labelColors[label] = tint }
+            }
+        }
+        return ChromiumProfiles(names: names, tokens: tokens, colors: colors, labelColors: labelColors)
     }
 
     private static func cachedFirefoxIni(at url: URL) -> String? {

@@ -32,8 +32,50 @@ chmod +x "$APP/Contents/MacOS/DockBar"
 
 IDENTITY="${CODESIGN_IDENTITY:-DockBar Development}"
 "$ROOT/scripts/ensure-signing-identity.sh"
-echo "Signing with $IDENTITY"
-codesign --force --sign "$IDENTITY" --identifier com.sanfordliu.DockBar "$APP"
+# Several certificates can share the name. Permissions stick to the oldest one.
+HASH="$(
+  python3 - "$IDENTITY" << 'PY'
+import datetime, os, subprocess, sys
+name = sys.argv[1]
+listed = subprocess.check_output(["security", "find-identity", "-v", "-p", "codesigning"], text=True)
+valid = set()
+for line in listed.splitlines():
+    if name not in line:
+        continue
+    parts = line.split()
+    if len(parts) >= 2:
+        valid.add(parts[1].strip('"'))
+keychain = os.path.expanduser("~/Library/Keychains/login.keychain-db")
+pem = subprocess.check_output(["security", "find-certificate", "-a", "-c", name, "-p", keychain], text=True)
+best = None
+best_date = None
+for chunk in pem.split("-----END CERTIFICATE-----"):
+    if "BEGIN CERTIFICATE" not in chunk:
+        continue
+    body = chunk.strip() + "\n-----END CERTIFICATE-----\n"
+    info = subprocess.check_output(
+        ["openssl", "x509", "-noout", "-fingerprint", "-sha1", "-startdate"],
+        input=body, text=True,
+    )
+    fingerprint = None
+    started = None
+    for line in info.splitlines():
+        if "Fingerprint=" in line:
+            fingerprint = line.split("=", 1)[1].replace(":", "").strip()
+        if line.startswith("notBefore="):
+            started = datetime.datetime.strptime(line.split("=", 1)[1], "%b %d %H:%M:%S %Y %Z")
+    if fingerprint not in valid or started is None:
+        continue
+    if best_date is None or started < best_date:
+        best_date = started
+        best = fingerprint
+if best is None:
+    sys.exit(f"No code-signing identity named {name}")
+print(best)
+PY
+)"
+echo "Signing with $HASH ($IDENTITY)"
+codesign --force --sign "$HASH" --identifier com.sanfordliu.DockBar "$APP"
 
 mkdir -p "$HOME/Applications"
 if pgrep -x DockBar >/dev/null 2>&1; then

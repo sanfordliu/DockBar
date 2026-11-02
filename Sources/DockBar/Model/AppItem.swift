@@ -28,6 +28,17 @@ struct AppItem: Identifiable, Equatable {
     var isRunning: Bool
     var windowsOnScreen: [WindowInfo]
     var isActive: Bool
+    /// App identity used for pins. Window buttons keep this even when `id` is per window.
+    var appID: String = ""
+    /// Extra windows of a pinned app follow that pin when the bar is reordered.
+    var followsPin: Bool = false
+    /// Title shown beside the icon when labels are on.
+    var label: String?
+    /// Chrome profile, shown under the title.
+    var subtitle: String?
+    var profileTint: ProfileTint?
 
     var bundleURL: URL { URL(fileURLWithPath: path) }
+    var pinID: String { appID.isEmpty ? id : appID }
+    var appIsPinned: Bool { isPinned || followsPin }
 }

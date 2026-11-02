@@ -27,6 +27,12 @@ struct DockBarTests {
         #expect(settings.showTrash)
         #expect(settings.showPinnedOnAllScreens)
         #expect(settings.openWindowsOnClickedDisplay)
+        #expect(settings.groupWindows)
+        #expect(!settings.showWindowLabels)
+        let plainStride = settings.iconStride
+        settings.showWindowLabels = true
+        #expect(settings.iconStride == plainStride)
+        #expect(settings.labeledButtonWidth == settings.iconStride + BarSettings.labelWidth + 6)
         #expect(settings.bottomGap == 0)
         #expect(settings.trashSlot == settings.effectiveIconSize + 36)
         #expect(IconAlignment.center.label == "Center")
@@ -41,6 +47,8 @@ struct DockBarTests {
         settings.showTrash = false
         settings.showPinnedOnAllScreens = false
         settings.openWindowsOnClickedDisplay = false
+        settings.groupWindows = false
+        settings.showWindowLabels = true
         #expect(settings.iconSize <= BarSettings.maximumIconSize(for: 40))
         #expect(settings.bottomGap == 6)
         #expect(settings.occupiedHeight == 46)
@@ -54,6 +62,8 @@ struct DockBarTests {
         #expect(!again.showTrash)
         #expect(!again.showPinnedOnAllScreens)
         #expect(!again.openWindowsOnClickedDisplay)
+        #expect(!again.groupWindows)
+        #expect(again.showWindowLabels)
 
         defaults.set(10, forKey: "barHeight")
         defaults.set(0, forKey: "iconSize")
@@ -389,7 +399,7 @@ struct DockBarTests {
         let floating = model.panelFrame(for: screen)
         let floatingRow = model.entries(for: screen.displayID)
         let contentWidth = BarLayout.floatingWidth(
-            itemCount: floatingRow.count,
+            items: floatingRow,
             settings: model.settings,
             showsFinderDivider: floatingRow.contains {
                 $0.isPinned && model.settings.showFinder && $0.bundleID == TaskbarModel.finderBundleID
@@ -573,6 +583,99 @@ struct DockBarTests {
         model.clearDropTarget()
     }
 
+    @Test func windowGroupingLabelsAndProfileTint() throws {
+        let model = TaskbarModel(defaults: freshDefaults())
+        model.settings.showFinder = false
+        let chromePath = "/Applications/Google Chrome.app"
+        let edit = pin(path: textEditPath, bundle: "com.apple.TextEdit", name: "TextEdit")
+        let calcPath = "/System/Applications/Calculator.app"
+        let calc = pin(path: calcPath, bundle: "com.apple.calculator", name: "Calculator")
+        let editApp = LiveApp(pid: 50, bundleID: "com.apple.TextEdit", path: textEditPath, name: "TextEdit", isHidden: false)
+        let chromeApp = LiveApp(pid: 60, bundleID: "com.google.Chrome", path: chromePath, name: "Google Chrome", isHidden: false)
+        let workTint = ProfileTint(red: 0.26, green: 0.52, blue: 0.96)
+        let homeTint = ProfileTint(red: 0.90, green: 0.25, blue: 0.20)
+        var work = window(id: 1, pid: 60, title: "Inbox - Work - Google Chrome", height: 400, display: screen.displayID, minimized: false)
+        work.profileName = "Work"
+        work.profileTint = workTint
+        var home = window(id: 2, pid: 60, title: "Home - Personal - Google Chrome", height: 400, display: screen.displayID, minimized: false)
+        home.profileName = "Personal"
+        home.profileTint = homeTint
+        let notes = window(id: 3, pid: 50, title: "Notes", height: 300, display: screen.displayID, minimized: false)
+        let letter = window(id: 4, pid: 50, title: "Letter", height: 300, display: screen.displayID, minimized: false)
+        model.loadSnapshot(
+            pins: [edit, calc],
+            apps: [50: editApp, 60: chromeApp],
+            windows: [work, home, notes, letter],
+            focusedWindowID: 3
+        )
+        let grouped = model.entries(for: screen.displayID)
+        let groupedChrome = try #require(grouped.first { $0.bundleID == "com.google.Chrome" })
+        #expect(grouped.filter { $0.bundleID == "com.google.Chrome" }.count == 1)
+        #expect(groupedChrome.windowsOnScreen.count == 2)
+        #expect(groupedChrome.profileTint == nil)
+        #expect(groupedChrome.subtitle == nil)
+        #expect(groupedChrome.label == "Google Chrome")
+        #expect(grouped.filter { $0.bundleID == "com.apple.TextEdit" }.count == 1)
+
+        model.settings.groupWindows = false
+        model.settings.showWindowLabels = true
+        model.loadSnapshot(
+            pins: [edit, calc],
+            apps: [50: editApp, 60: chromeApp],
+            windows: [work, home, notes, letter],
+            focusedWindowID: 3
+        )
+        let row = model.entries(for: screen.displayID)
+        let chromeButtons = row.filter { $0.bundleID == "com.google.Chrome" }
+        #expect(chromeButtons.count == 2)
+        #expect(chromeButtons.compactMap(\.label).sorted() == ["Home", "Inbox"])
+        #expect(Set(chromeButtons.compactMap(\.subtitle)) == ["Personal", "Work"])
+        let inbox = try #require(chromeButtons.first { $0.label == "Inbox" })
+        let homeButton = try #require(chromeButtons.first { $0.label == "Home" })
+        #expect(inbox.profileTint == workTint)
+        #expect(homeButton.profileTint == homeTint)
+        #expect(inbox.id != homeButton.id)
+        #expect(!inbox.isPinned)
+
+        let editButtons = row.filter { $0.pinID == edit.id }
+        #expect(editButtons.count == 2)
+        #expect(editButtons.filter(\.isPinned).count == 1)
+        #expect(editButtons.contains { $0.id == edit.id && $0.label == "Notes" && $0.isActive })
+        let companion = try #require(editButtons.first { $0.id == "\(edit.id)#4" })
+        #expect(companion.followsPin)
+        #expect(companion.label == "Letter")
+        #expect(!companion.isActive)
+
+        render(AppIconButton(item: inbox, displayID: screen.displayID, model: model))
+        render(AppIconButton(item: editButtons[0], displayID: screen.displayID, model: model))
+
+        let stride = model.settings.iconStride
+        let anchor = try #require(row.first { $0.id == edit.id })
+        let calcButton = try #require(row.first { $0.id == calc.id })
+        #expect(model.settings.showsLabel(for: anchor))
+        #expect(model.settings.showsLabel(for: inbox))
+        #expect(!model.settings.showsLabel(for: calcButton))
+        #expect(model.settings.buttonWidth(for: calcButton) == stride)
+        #expect(model.settings.buttonWidth(for: anchor) == model.settings.labeledButtonWidth)
+        model.beginDrag(id: edit.id, displayID: screen.displayID)
+        model.updateDrag(dx: stride, mouse: away)
+        #expect(model.dragOffset(for: anchor, displayID: screen.displayID) == stride)
+        #expect(model.dragOffset(for: companion, displayID: screen.displayID) == stride)
+        #expect(model.dragOffset(for: calcButton, displayID: screen.displayID) == -(model.settings.labeledButtonWidth * 2))
+        model.loadSnapshot(pins: [calc])
+        #expect(model.entries(for: screen.displayID).allSatisfy { !model.settings.showsLabel(for: $0) })
+        model.loadSnapshot(
+            pins: [edit, calc],
+            apps: [50: editApp, 60: chromeApp],
+            windows: [work, home, notes, letter],
+            focusedWindowID: 3
+        )
+        model.beginDrag(id: edit.id, displayID: screen.displayID)
+        model.updateDrag(dx: stride, mouse: away)
+        model.endDrag(at: away)
+        #expect(model.entries(for: screen.displayID).filter(\.isPinned).map(\.id) == [calc.id, edit.id])
+    }
+
     @Test func thumbnailsPreviewAndHighlight() {
         let model = TaskbarModel.shared
         let itemWindow = window(id: 404, pid: 70, title: "Preview", height: 100, display: screen.displayID, minimized: true)
@@ -671,8 +774,12 @@ struct DockBarTests {
         panel.install(host)
         panel.applyChrome(floating: true)
         #expect(panel.backgroundColor?.alphaComponent == 0)
+        let glass = panel.contentView?.subviews.compactMap { $0 as? NSGlassEffectView }.first
+        #expect(glass?.style == .regular)
+        #expect((glass?.cornerRadius ?? 0) > 0)
         panel.applyChrome(floating: false)
-        #expect((panel.backgroundColor?.alphaComponent ?? 0) > 0)
+        #expect(panel.backgroundColor?.alphaComponent == 0)
+        #expect(glass?.cornerRadius == 0)
         panel.orderFrontRegardless()
         BarHitShape.apply(to: panel)
         if let moved = NSEvent.mouseEvent(
@@ -778,12 +885,26 @@ struct DockBarTests {
         #expect(BrowserProfile.profileDirectory(from: ["--profile-directory", "\"Default\""]) == "Default")
         #expect(BrowserProfile.profileDirectory(from: ["--user-data-dir=/tmp"]) == nil)
 
+        let blueBits = Int(Int32(bitPattern: UInt32(0xFF42_85F4)))
+        let redBits = Int(Int32(bitPattern: UInt32(0xFFFF_0000)))
+        let blue = ProfileTint(red: 66.0 / 255, green: 133.0 / 255, blue: 244.0 / 255)
+        let red = ProfileTint(red: 1, green: 0, blue: 0)
+        #expect(BrowserProfile.profileTint(skColor: blueBits) == blue)
+        #expect(BrowserProfile.profileTint(skColor: redBits) == red)
+        #expect(BrowserProfile.profileTint(skColor: 0x0042_85F4) == nil)
         let state = Data("""
         {"profile":{"info_cache":{
-          "Default":{"name":"Personal","user_name":"me@example.com"},
-          "Profile 1":{"name":"Person 1","user_name":"work@example.com","gaia_name":"Work"}
+          "Default":{"name":"Personal","user_name":"me@example.com","profile_highlight_color":\(redBits)},
+          "Profile 1":{"name":"Person 1","user_name":"work@example.com","gaia_name":"Work","profile_highlight_color":\(blueBits),"profile_color_seed":\(redBits)}
         }}}
         """.utf8)
+        let colors = BrowserProfile.profileColors(in: state)
+        #expect(colors["Default"] == red)
+        #expect(colors["Profile 1"] == blue)
+        let seedOnly = Data("""
+        {"profile":{"info_cache":{"Default":{"name":"Personal","profile_color_seed":\(redBits)}}}}
+        """.utf8)
+        #expect(BrowserProfile.profileColors(in: seedOnly)["Default"] == red)
         let names = BrowserProfile.profileNames(in: state)
         #expect(names["Default"] == "Personal")
         #expect(names["Profile 1"] == "Work")
@@ -795,12 +916,13 @@ struct DockBarTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("profiles-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try state.write(to: root.appendingPathComponent("Local State"))
-        let work = BrowserProfile.name(
+        let work = BrowserProfile.mark(
             bundleID: "com.google.Chrome",
             arguments: ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--profile-directory=Profile 1"],
             supportRoot: root
         )
-        #expect(work == "Work")
+        #expect(work.name == "Work")
+        #expect(work.tint == blue)
         let tokens = BrowserProfile.titleTokens(in: state)
         #expect(BrowserProfile.profileLabel(
             in: "Inbox - Google Chrome - Ada (Work)",
@@ -813,13 +935,15 @@ struct DockBarTests {
             products: ["Google Chrome"]
         ) == "Personal")
         #expect(BrowserProfile.profileLabel(in: "Notes (Personal)", tokens: tokens, products: ["Google Chrome"]) == nil)
-        #expect(BrowserProfile.name(
+        let personal = BrowserProfile.mark(
             bundleID: "com.google.Chrome",
             arguments: ["Google Chrome"],
             supportRoot: root,
             windowTitle: "Board - Google Chrome - Ada (Personal)",
             appName: "Google Chrome"
-        ) == "Personal")
+        )
+        #expect(personal.name == "Personal")
+        #expect(personal.tint == red)
         #expect(BrowserProfile.name(
             bundleID: "com.google.Chrome",
             arguments: ["Google Chrome"],
@@ -828,14 +952,16 @@ struct DockBarTests {
             appName: "Google Chrome"
         ) == nil)
         let only = Data("""
-        {"profile":{"info_cache":{"Default":{"name":"Personal"}}}}
+        {"profile":{"info_cache":{"Default":{"name":"Personal","profile_highlight_color":\(blueBits)}}}}
         """.utf8)
         try only.write(to: root.appendingPathComponent("Local State"))
-        #expect(BrowserProfile.name(
+        let alone = BrowserProfile.mark(
             bundleID: "com.google.Chrome",
             arguments: ["--profile-directory=Default"],
             supportRoot: root
-        ) == nil)
+        )
+        #expect(alone.name == nil)
+        #expect(alone.tint == blue)
         #expect(BrowserProfile.name(bundleID: "com.apple.TextEdit", arguments: [], supportRoot: root) == nil)
 
         let ini = """

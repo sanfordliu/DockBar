@@ -95,7 +95,7 @@ final class TaskbarModel {
             let showsFinderDivider = row.contains { $0.isPinned && settings.showFinder && $0.bundleID == Self.finderBundleID }
             let base = min(
                 screen.frame.width - 24,
-                BarLayout.floatingWidth(itemCount: row.count, settings: settings, showsFinderDivider: showsFinderDivider)
+                BarLayout.floatingWidth(items: row, settings: settings, showsFinderDivider: showsFinderDivider)
             )
             let gap = barTrailingGap(for: screen.displayID)
             let width = min(screen.frame.width - 24, base + gap)
@@ -114,22 +114,23 @@ final class TaskbarModel {
     func dragOffset(for item: AppItem, displayID: CGDirectDisplayID) -> CGFloat {
         guard let dragID, dragDisplay == displayID, abs(dragDX) > 1 else { return 0 }
         let row = entries(for: displayID)
-        guard let origin = row.firstIndex(where: { $0.id == dragID }),
-              let index = row.firstIndex(where: { $0.id == item.id }),
-              row[origin].isPinned else { return 0 }
-        let stride = settings.iconStride
+        let runs = iconRuns(in: row)
+        guard let origin = runs.firstIndex(where: { row[$0.anchorIndex].id == dragID }),
+              let index = row.firstIndex(where: { $0.id == item.id }) else { return 0 }
+        let originRun = runs[origin]
         let minSlot = finderLocked(in: row) ? 1 : 0
         if origin < minSlot { return 0 }
-        let maxIndex = row.lastIndex(where: \.isPinned) ?? origin
-        let minDX = CGFloat(minSlot - origin) * stride
-        if item.id == dragID { return max(dragDX, minDX) }
-        guard item.isPinned else { return 0 }
-        if trashDragHover { return index > origin ? -stride : 0 }
-        let dx = min(max(dragDX, minDX), CGFloat(maxIndex - origin) * stride)
-        let steps = Int((dx / stride).rounded())
-        let destination = min(max(origin + steps, minSlot), maxIndex)
-        if destination > origin, index > origin, index <= destination { return -stride }
-        if destination < origin, index < origin, index >= destination { return stride }
+        let minDX = -runWidth(runs, from: minSlot, to: origin)
+        let inDragged = index >= originRun.anchorIndex && index < originRun.anchorIndex + originRun.length
+        if inDragged { return max(dragDX, minDX) }
+        guard let runIndex = runs.firstIndex(where: { index >= $0.anchorIndex && index < $0.anchorIndex + $0.length }) else {
+            return 0
+        }
+        if trashDragHover { return runIndex > origin ? -originRun.width : 0 }
+        let dx = min(max(dragDX, minDX), runWidth(runs, from: origin + 1, to: runs.count))
+        let destination = pinSlot(runs: runs, origin: origin, dragDX: dx, minSlot: minSlot)
+        if destination > origin, runIndex > origin, runIndex <= destination { return -originRun.width }
+        if destination < origin, runIndex < origin, runIndex >= destination { return originRun.width }
         return 0
     }
 
@@ -201,18 +202,18 @@ final class TaskbarModel {
             recompute()
             return
         }
-        let row = entries(for: dragDisplay).filter(\.isPinned)
-        if let origin = row.firstIndex(where: { $0.id == dragID }) {
-            let steps = Int((dragDX / settings.iconStride).rounded())
+        let row = entries(for: dragDisplay)
+        let runs = iconRuns(in: row)
+        if let origin = runs.firstIndex(where: { row[$0.anchorIndex].id == dragID }) {
             let minSlot = finderLocked(in: row) ? 1 : 0
             guard origin >= minSlot else {
                 clearDrag()
                 recompute()
                 return
             }
-            let destination = min(max(origin + steps, minSlot), row.count - 1)
+            let destination = pinSlot(runs: runs, origin: origin, dragDX: dragDX, minSlot: minSlot)
             if origin != destination {
-                var ids = row.map(\.id)
+                var ids = runs.map { row[$0.anchorIndex].pinID }
                 let moved = ids.remove(at: origin)
                 ids.insert(moved, at: destination)
                 var ordered: [Pin] = []
@@ -307,7 +308,7 @@ final class TaskbarModel {
     }
 
     func pin(_ item: AppItem) {
-        guard !pins.contains(where: { $0.id == item.id }) else { return }
+        guard !pins.contains(where: { $0.id == item.pinID }) else { return }
         pins.append(Pin(path: item.path, bundleID: item.bundleID, name: item.name))
         savePins()
         recompute()
@@ -340,19 +341,18 @@ final class TaskbarModel {
     func visualPinInsertIndex(at point: CGPoint) -> Int? {
         guard let screen = NSScreen.screens.first(where: { panelFrame(for: $0).contains(point) }) else { return nil }
         let row = entries(for: screen.displayID)
-        let pinned = row.filter(\.isPinned)
+        let runs = iconRuns(in: row)
         let start = iconClusterMinX(on: screen, row: row)
         var x = start
-        let stride = settings.iconStride
         let earliest = finderLocked(in: row) ? 1 : 0
         let gapIndex = dropDisplay == screen.displayID ? dropVisualIndex : nil
-        for (index, item) in pinned.enumerated() {
-            if gapIndex == index { x += stride }
-            if point.x < x + stride / 2 { return max(index, earliest) }
-            x += stride
-            if showsFinderDivider(after: item) { x += BarLayout.dividerWidth }
+        for (index, run) in runs.enumerated() {
+            if gapIndex == index { x += settings.iconStride }
+            if point.x < x + run.width / 2 { return max(index, earliest) }
+            x += run.width
+            if run.showsDivider { x += BarLayout.dividerWidth }
         }
-        return max(pinned.count, earliest)
+        return max(runs.count, earliest)
     }
 
     func trackDrop(at screenPoint: CGPoint) {
@@ -380,12 +380,12 @@ final class TaskbarModel {
         guard dragID == nil, dropDisplay == displayID, let visual = dropVisualIndex else { return 0 }
         let row = entries(for: displayID)
         guard let index = row.firstIndex(where: { $0.id == item.id }) else { return 0 }
-        let pinned = row.filter(\.isPinned)
+        let runs = iconRuns(in: row)
         let gapRowIndex: Int
-        if visual >= pinned.count {
-            gapRowIndex = row.firstIndex(where: { !$0.isPinned }) ?? row.count
+        if visual >= runs.count {
+            gapRowIndex = runs.last.map { $0.anchorIndex + $0.length } ?? 0
         } else {
-            gapRowIndex = row.firstIndex(where: { $0.id == pinned[visual].id }) ?? visual
+            gapRowIndex = runs[visual].anchorIndex
         }
         return index >= gapRowIndex ? settings.iconStride : 0
     }
@@ -404,18 +404,83 @@ final class TaskbarModel {
         pins = ordered
     }
 
-    private func showsFinderDivider(after item: AppItem) -> Bool {
-        item.isPinned && settings.showFinder && item.bundleID == Self.finderBundleID
+    /// One pinned app plus the extra window buttons that sit in its slot.
+    struct IconRun {
+        var anchorIndex: Int
+        var length: Int
+        var width: CGFloat
+        var showsDivider: Bool
+    }
+
+    func iconRuns(in row: [AppItem]) -> [IconRun] {
+        var runs: [IconRun] = []
+        var index = 0
+        while index < row.count {
+            guard row[index].isPinned else { break }
+            let pinID = row[index].pinID
+            var length = 1
+            var next = index + 1
+            while next < row.count, !row[next].isPinned, row[next].pinID == pinID {
+                length += 1
+                next += 1
+            }
+            let finder = row[index].bundleID == Self.finderBundleID || pinID == Self.finderBundleID
+            let width = (0..<length).reduce(CGFloat(0)) { total, offset in
+                total + settings.buttonWidth(for: row[index + offset])
+            }
+            runs.append(IconRun(
+                anchorIndex: index,
+                length: length,
+                width: width,
+                showsDivider: settings.showFinder && finder
+            ))
+            index = next
+        }
+        return runs
+    }
+
+    func showsDivider(after item: AppItem, in row: [AppItem]) -> Bool {
+        guard let index = row.firstIndex(where: { $0.id == item.id }) else { return false }
+        return iconRuns(in: row).contains { run in
+            run.showsDivider && index == run.anchorIndex + run.length - 1
+        }
+    }
+
+    private func runWidth(_ runs: [IconRun], from start: Int, to end: Int) -> CGFloat {
+        guard start < end, start >= 0, end <= runs.count else { return 0 }
+        return runs[start..<end].reduce(0) { $0 + $1.width }
+    }
+
+    /// Pin slot the pointer has crossed. One-icon runs match rounding `dragDX / stride`.
+    private func pinSlot(runs: [IconRun], origin: Int, dragDX: CGFloat, minSlot: Int) -> Int {
+        guard !runs.isEmpty else { return origin }
+        var destination = origin
+        var remaining = dragDX
+        if dragDX > 0 {
+            while destination < runs.count - 1 {
+                let next = runs[destination + 1].width
+                if remaining < next / 2 { break }
+                remaining -= next
+                destination += 1
+            }
+        } else if dragDX < 0 {
+            while destination > minSlot {
+                let previous = runs[destination - 1].width
+                if -remaining < previous / 2 { break }
+                remaining += previous
+                destination -= 1
+            }
+        }
+        return destination
     }
 
     /// Left edge of the first icon, matching the bar's SwiftUI layout.
     private func iconClusterMinX(on screen: NSScreen, row: [AppItem]) -> CGFloat {
         let panel = panelFrame(for: screen)
-        let stride = settings.iconStride
         var cluster: CGFloat = 0
         for item in row {
-            cluster += stride
-            if showsFinderDivider(after: item) { cluster += BarLayout.dividerWidth }
+            cluster += settings.buttonWidth(for: item)
+            if showsDivider(after: item, in: row) { cluster += BarLayout.dividerWidth }
         }
         if settings.style == .floating {
             return panel.minX + BarLayout.edgeInset
@@ -448,13 +513,13 @@ final class TaskbarModel {
     }
 
     func unpin(_ item: AppItem) {
-        pins.removeAll { $0.id == item.id }
+        pins.removeAll { $0.id == item.pinID }
         savePins()
         recompute()
     }
 
     func togglePin(_ item: AppItem) {
-        if item.isPinned {
+        if item.appIsPinned {
             if settings.showFinder && isFinder(item) {
                 settings.showFinder = false
                 pins.removeAll { isFinder($0) }
@@ -595,17 +660,38 @@ final class TaskbarModel {
                 let wins = windowsOn(displayID, pids: pids)
                 let pid = wins.first?.ownerPID ?? matches.first?.pid
                 let name = matches.first?.name ?? pin.name
-                items.append(AppItem(
-                    id: identity,
-                    name: name,
-                    path: path,
-                    bundleID: pin.bundleID ?? matches.first?.bundleID,
-                    pid: pid,
-                    isPinned: true,
-                    isRunning: !matches.isEmpty,
-                    windowsOnScreen: wins,
-                    isActive: isActive(pid: pid, windows: wins)
-                ))
+                let bundleID = pin.bundleID ?? matches.first?.bundleID
+                if settings.groupWindows || wins.count <= 1 {
+                    items.append(appButton(
+                        id: identity,
+                        appID: identity,
+                        name: name,
+                        path: path,
+                        bundleID: bundleID,
+                        pid: pid,
+                        isPinned: true,
+                        followsPin: true,
+                        isRunning: !matches.isEmpty,
+                        windows: wins,
+                        focus: nil
+                    ))
+                } else {
+                    for (offset, window) in wins.enumerated() {
+                        items.append(appButton(
+                            id: offset == 0 ? identity : "\(identity)#\(window.windowID)",
+                            appID: identity,
+                            name: name,
+                            path: path,
+                            bundleID: bundleID,
+                            pid: window.ownerPID,
+                            isPinned: offset == 0,
+                            followsPin: true,
+                            isRunning: true,
+                            windows: [window],
+                            focus: window
+                        ))
+                    }
+                }
                 shown.insert(identity)
             }
         }
@@ -615,31 +701,139 @@ final class TaskbarModel {
         for (pid, wins) in grouped.sorted(by: { $0.key < $1.key }) {
             guard let app = liveApps[pid] else { continue }
             if shown.contains(app.id) {
-                if let index = items.firstIndex(where: { $0.id == app.id }) {
-                    var merged = items[index].windowsOnScreen
-                    for window in wins where !merged.contains(where: { $0.windowID == window.windowID }) {
-                        merged.append(window)
+                if settings.groupWindows {
+                    if let index = items.firstIndex(where: { $0.id == app.id }) {
+                        var merged = items[index].windowsOnScreen
+                        for window in wins where !merged.contains(where: { $0.windowID == window.windowID }) {
+                            merged.append(window)
+                        }
+                        items[index].windowsOnScreen = merged
+                        items[index].pid = wins.first?.ownerPID ?? items[index].pid
+                        items[index].isActive = isActive(pid: items[index].pid, windows: merged)
+                        let presented = presentation(appName: items[index].name, windows: merged, focus: nil)
+                        items[index].label = presented.label
+                        items[index].subtitle = presented.subtitle
+                        items[index].profileTint = presented.tint
                     }
-                    items[index].windowsOnScreen = merged
-                    items[index].pid = wins.first?.ownerPID ?? items[index].pid
-                    items[index].isActive = isActive(pid: items[index].pid, windows: merged)
+                } else {
+                    appendWindows(wins, of: app, to: &items)
                 }
                 continue
             }
-            items.append(AppItem(
-                id: app.id,
-                name: app.name,
-                path: app.path,
-                bundleID: app.bundleID,
-                pid: pid,
-                isPinned: false,
-                isRunning: true,
-                windowsOnScreen: wins,
-                isActive: isActive(pid: pid, windows: wins)
-            ))
+            if settings.groupWindows || wins.count <= 1 {
+                items.append(appButton(
+                    id: app.id,
+                    appID: app.id,
+                    name: app.name,
+                    path: app.path,
+                    bundleID: app.bundleID,
+                    pid: pid,
+                    isPinned: false,
+                    followsPin: false,
+                    isRunning: true,
+                    windows: wins,
+                    focus: wins.count == 1 ? wins.first : nil
+                ))
+            } else {
+                for window in wins {
+                    items.append(appButton(
+                        id: "\(app.id)#\(window.windowID)",
+                        appID: app.id,
+                        name: app.name,
+                        path: app.path,
+                        bundleID: app.bundleID,
+                        pid: pid,
+                        isPinned: false,
+                        followsPin: false,
+                        isRunning: true,
+                        windows: [window],
+                        focus: window
+                    ))
+                }
+            }
             shown.insert(app.id)
         }
         return items
+    }
+
+    private func appendWindows(_ wins: [WindowInfo], of app: LiveApp, to items: inout [AppItem]) {
+        let present = Set(items.filter { $0.pinID == app.id }.flatMap { $0.windowsOnScreen.map(\.windowID) })
+        for window in wins where !present.contains(window.windowID) {
+            let button = appButton(
+                id: "\(app.id)#\(window.windowID)",
+                appID: app.id,
+                name: app.name,
+                path: app.path,
+                bundleID: app.bundleID,
+                pid: window.ownerPID,
+                isPinned: false,
+                followsPin: items.contains { $0.pinID == app.id && $0.appIsPinned },
+                isRunning: true,
+                windows: [window],
+                focus: window
+            )
+            if let last = items.lastIndex(where: { $0.pinID == app.id }) {
+                items.insert(button, at: items.index(after: last))
+            } else {
+                items.append(button)
+            }
+        }
+    }
+
+    private func appButton(
+        id: String,
+        appID: String,
+        name: String,
+        path: String,
+        bundleID: String?,
+        pid: pid_t?,
+        isPinned: Bool,
+        followsPin: Bool,
+        isRunning: Bool,
+        windows: [WindowInfo],
+        focus: WindowInfo?
+    ) -> AppItem {
+        let presented = presentation(appName: name, windows: windows, focus: focus)
+        return AppItem(
+            id: id,
+            name: name,
+            path: path,
+            bundleID: bundleID,
+            pid: pid,
+            isPinned: isPinned,
+            isRunning: isRunning,
+            windowsOnScreen: windows,
+            isActive: isActive(pid: pid, windows: windows),
+            appID: appID,
+            followsPin: followsPin,
+            label: presented.label,
+            subtitle: presented.subtitle,
+            profileTint: presented.tint
+        )
+    }
+
+    private func presentation(
+        appName: String,
+        windows: [WindowInfo],
+        focus: WindowInfo?
+    ) -> (label: String, subtitle: String?, tint: ProfileTint?) {
+        if let focus {
+            return (
+                BrowserProfile.pageTitle(focus.title, appName: appName, profile: focus.profileName),
+                focus.profileName,
+                settings.groupWindows ? nil : focus.profileTint
+            )
+        }
+        if windows.count == 1, let only = windows.first {
+            return (
+                BrowserProfile.pageTitle(only.title, appName: appName, profile: only.profileName),
+                only.profileName,
+                settings.groupWindows ? nil : only.profileTint
+            )
+        }
+        let names = windows.compactMap(\.profileName)
+        let subtitle = names.count == windows.count && names.allSatisfy { $0 == names.first } ? names.first : nil
+        return (appName, subtitle, nil)
     }
 
     private func windowsOn(_ displayID: CGDirectDisplayID, pids: Set<pid_t>) -> [WindowInfo] {

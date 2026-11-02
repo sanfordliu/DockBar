@@ -8,37 +8,32 @@ struct AppIconButton: View {
 
     var body: some View {
         let size = model.settings.effectiveIconSize
-        let pad: CGFloat = 5
+        let labels = model.settings.showsLabel(for: item)
         let offset = model.dragOffset(for: item, displayID: displayID) + model.dropGapOffset(for: item, displayID: displayID)
-        let draggingThis = model.dragID == item.id
+        let draggingThis = model.dragID == item.id || (item.followsPin && model.dragID == item.pinID)
         let showWell = model.dragID == nil && model.hoveredAppID == item.id
-        Image(nsImage: IconCache.shared.icon(for: item.path))
-            .resizable()
-            .interpolation(.high)
-            .frame(width: size, height: size)
-            .opacity(item.isRunning ? 1 : 0.55)
-            .padding(pad)
-            .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(showWell ? 0.16 : 0))
-                    .padding(.horizontal, 3)
+        HStack(spacing: labels ? 6 : 0) {
+            icon(size: size)
+                .scaleEffect(showWell && !draggingThis ? 1.08 : 1)
+            if labels {
+                labelColumn
+                    .frame(width: BarSettings.labelWidth, alignment: .leading)
             }
-            .overlay(alignment: .bottom) {
-                Capsule()
-                    .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
-                    .frame(width: item.isActive ? 16 : 4, height: 3)
-                    .padding(.bottom, 1)
-                    .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
-            }
-            .frame(width: model.settings.iconStride, height: model.settings.barHeight - 6)
-            .scaleEffect(showWell && !draggingThis ? 1.08 : 1)
+        }
+        .frame(width: model.settings.buttonWidth(for: item), height: model.settings.barHeight - 6)
+        .background {
+            RoundedRectangle(cornerRadius: labels ? 8 : 6, style: .continuous)
+                .fill(Color.primary.opacity(showWell ? 0.14 : 0))
+                .padding(.horizontal, 3)
+                .padding(.vertical, 4)
+        }
         .animation(draggingThis ? nil : .spring(duration: 0.22), value: showWell)
         .offset(x: offset)
         .animation(draggingThis || model.dragID == nil ? nil : .spring(duration: 0.22), value: offset)
-        .zIndex(model.dragID == item.id ? 2 : 0)
+        .zIndex(draggingThis ? 2 : 0)
         .overlay {
             ClickCatcher(
-                dragEnabled: item.isPinned && !(model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID),
+                dragEnabled: item.appIsPinned && !(model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID),
                 onLeft: { rect in
                     model.primaryClick(item, displayID: displayID, anchor: rect)
                 },
@@ -55,12 +50,65 @@ struct AppIconButton: View {
                         PreviewCoordinator.shared.iconExited()
                     }
                 },
-                onDragBegan: { model.beginDrag(id: item.id, displayID: displayID) },
+                onDragBegan: { model.beginDrag(id: item.pinID, displayID: displayID) },
                 onDrag: { model.updateDrag(dx: $0) },
                 onDragEnd: { model.endDrag() }
             )
         }
-        .accessibilityLabel(item.name)
+        .accessibilityLabel(accessibilityName)
+    }
+
+    private var accessibilityName: String {
+        guard model.settings.showsLabel(for: item) else { return item.name }
+        var parts = [item.label ?? item.name]
+        if let subtitle = item.subtitle, !subtitle.isEmpty { parts.append(subtitle) }
+        return parts.joined(separator: ", ")
+    }
+
+    private func icon(size: CGFloat) -> some View {
+        let tint = item.profileTint.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
+        return Image(nsImage: IconCache.shared.icon(for: item.path))
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .overlay {
+                if let tint {
+                    tint.blendMode(.color)
+                }
+            }
+            .overlay {
+                if let tint {
+                    RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                        .strokeBorder(tint, lineWidth: 1.5)
+                }
+            }
+            .compositingGroup()
+            .opacity(item.isRunning ? 1 : 0.55)
+            .padding(5)
+            .overlay(alignment: .bottom) {
+                Capsule()
+                    .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
+                    .frame(width: item.isActive ? 16 : 4, height: 3)
+                    .padding(.bottom, 1)
+                    .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
+            }
+    }
+
+    private var labelColumn: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(item.label ?? item.name)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let subtitle = item.subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
     }
 }
 
@@ -282,7 +330,7 @@ enum AppMenu {
         add(menu, title: "New Window", actions: &actions) {
             TaskbarModel.shared.newWindow(for: item, on: displayID)
         }
-        add(menu, title: item.isPinned ? "Unpin" : "Pin", actions: &actions) {
+        add(menu, title: item.appIsPinned ? "Unpin" : "Pin", actions: &actions) {
             TaskbarModel.shared.togglePin(item)
         }
         add(menu, title: "Show in Finder", actions: &actions) {

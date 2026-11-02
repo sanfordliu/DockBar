@@ -8,7 +8,9 @@ set -euo pipefail
 IDENTITY="${CODESIGN_IDENTITY:-DockBar Development}"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning | grep -F -q "$IDENTITY"; then
+# Capture first. grep -q would close the pipe early and, with pipefail, look like no certificate exists.
+identities="$(security find-identity -v -p codesigning || true)"
+if printf '%s\n' "$identities" | grep -F -q "$IDENTITY"; then
   exit 0
 fi
 
@@ -50,7 +52,8 @@ security import "$WORK/cert.p12" \
 # User trust settings, so codesign accepts the certificate without an admin password.
 security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$WORK/cert.pem"
 
-if ! security find-identity -v -p codesigning | grep -F -q "$IDENTITY"; then
+identities="$(security find-identity -v -p codesigning || true)"
+if ! printf '%s\n' "$identities" | grep -F -q "$IDENTITY"; then
   echo "The certificate was created, but macOS still does not trust it for code signing." >&2
   echo "Open Keychain Access, find \"$IDENTITY\", and set it to Always Trust for Code Signing." >&2
   exit 1

@@ -7,7 +7,6 @@ struct TaskbarView: View {
     var body: some View {
         let items = model.entries(for: displayID)
         let floating = model.settings.style == .floating
-        let radius: CGFloat = floating ? model.settings.barHeight / 2 : 0
         Group {
             if floating {
                 floatingBar(items)
@@ -16,14 +15,6 @@ struct TaskbarView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(Color.black.opacity(0.12))
-        }
-        .glassEffect(
-            floating ? .regular.interactive() : .regular,
-            in: RoundedRectangle(cornerRadius: radius, style: .continuous)
-        )
     }
 
     /// A capsule that hugs the icons, with the same inset on both ends.
@@ -74,7 +65,7 @@ struct TaskbarView: View {
             }
             ForEach(items) { item in
                 AppIconButton(item: item, displayID: displayID, model: model)
-                if item.isPinned && model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID {
+                if model.showsDivider(after: item, in: items) {
                     BarDivider(height: model.settings.effectiveIconSize * 0.7)
                 }
             }
@@ -87,17 +78,16 @@ struct TaskbarView: View {
         }
         .animation(model.dragID == nil ? .spring(duration: 0.22) : nil, value: model.dropVisualIndex)
         .animation(model.dragID == nil ? .spring(duration: 0.28) : nil, value: items.map(\.id))
+        .zIndex(model.dragID == nil ? 0 : 2)
     }
 
     private func dropSlotX(_ items: [AppItem]) -> CGFloat? {
         guard model.dragID == nil, model.dropDisplay == displayID, let visual = model.dropVisualIndex else { return nil }
-        let pinned = items.filter(\.isPinned)
+        let runs = model.iconRuns(in: items)
         var x: CGFloat = 0
-        for item in pinned.prefix(min(visual, pinned.count)) {
-            x += model.settings.iconStride
-            if item.isPinned && model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID {
-                x += BarLayout.dividerWidth
-            }
+        for run in runs.prefix(min(visual, runs.count)) {
+            x += run.width
+            if run.showsDivider { x += BarLayout.dividerWidth }
         }
         return x
     }
@@ -130,8 +120,10 @@ enum BarLayout {
     static let trashInset: CGFloat = 4
     static var dividerWidth: CGFloat { dividerLine + dividerInset * 2 }
 
-    static func floatingWidth(itemCount: Int, settings: BarSettings, showsFinderDivider: Bool) -> CGFloat {
-        let icons = CGFloat(max(itemCount, 1)) * settings.iconStride
+    static func floatingWidth(items: [AppItem], settings: BarSettings, showsFinderDivider: Bool) -> CGFloat {
+        let icons = items.isEmpty
+            ? settings.iconStride
+            : items.reduce(CGFloat(0)) { $0 + settings.buttonWidth(for: $1) }
         let finder = showsFinderDivider ? dividerWidth : 0
         let trash = settings.showTrash ? dividerWidth + settings.effectiveIconSize + trashInset * 2 : 0
         return icons + finder + trash + edgeInset * 2
