@@ -4,6 +4,8 @@ DockBar is a taskbar for working across more than one display. The native Dock i
 
 Clicking an app opens or focuses its window on the display you clicked. Hover previews show the windows on that display. Pinned apps can appear on every screen, so the same apps are ready wherever you are working. The behavior is the Windows taskbar. The look stays Mac: Liquid Glass, either a full-width bar or a floating capsule.
 
+![DockBar along the bottom of the screen. Open windows show their titles, and each Chrome profile keeps its own color.](docs/dockbar.png)
+
 DockBar hides the Dock while it runs and puts your previous Dock setting back when you quit. A menu-bar icon opens settings. DockBar itself does not appear in the Dock.
 
 ## Requirements
