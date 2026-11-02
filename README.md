@@ -1,8 +1,10 @@
 # DockBar
 
-DockBar replaces the macOS Dock with a Liquid Glass taskbar on every display. It keeps your pinned apps, running apps, and the Trash in one bar, and it puts the Dock back when you quit.
+DockBar is a taskbar for working across more than one display. The native Dock is a single strip for the whole Mac, so a click often opens or focuses a window on another screen and that window is easy to lose. DockBar puts a bar on every display and keeps each display's windows with that bar.
 
-The bar can span the width of the screen or sit in the center as a floating capsule. A menu-bar icon opens settings. DockBar does not appear in the Dock, because the Dock is hidden while DockBar is running.
+Clicking an app opens or focuses its window on the display you clicked. Hover previews show the windows on that display. Pinned apps can appear on every screen, so the same apps are ready wherever you are working. The behavior is the Windows taskbar. The look stays Mac: Liquid Glass, either a full-width bar or a floating capsule.
+
+DockBar hides the Dock while it runs and puts your previous Dock setting back when you quit. A menu-bar icon opens settings. DockBar itself does not appear in the Dock.
 
 ## Requirements
 
