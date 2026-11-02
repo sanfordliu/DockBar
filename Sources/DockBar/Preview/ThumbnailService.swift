@@ -17,6 +17,10 @@ final class ThumbnailService {
     private(set) var images: [CGWindowID: NSImage] = [:]
     private var fetchedAt: [CGWindowID: Date] = [:]
     private var inFlight: Set<CGWindowID> = []
+    private var queued: [CGWindowID: CGFloat] = [:]
+    private var batchTask: Task<Void, Never>?
+    /// Nil until a refresh says which windows still exist. Captures for other ids are dropped.
+    private var kept: Set<CGWindowID>?
     private(set) var lastError: String?
 
     func image(for windowID: CGWindowID) -> NSImage? {
@@ -30,46 +34,82 @@ final class ThumbnailService {
            Date().timeIntervalSince(fetched) < 4 {
             return
         }
-        guard inFlight.insert(window.windowID).inserted else { return }
-        let windowID = window.windowID
+        if inFlight.contains(window.windowID) { return }
         let aspect = window.cgFrame.height > 1 ? window.cgFrame.width / window.cgFrame.height : 1.6
-        Task { @MainActor in
-            defer { self.inFlight.remove(windowID) }
-            if let box = await Self.capture(windowID: windowID, aspect: aspect) {
-                let image = NSImage(
-                    cgImage: box.image,
-                    size: NSSize(width: box.image.width, height: box.image.height)
-                )
-                self.images[windowID] = image
-                self.fetchedAt[windowID] = Date()
-                self.lastError = nil
+        queued[window.windowID] = aspect
+        guard batchTask == nil else { return }
+        batchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(16))
+            self.batchTask = nil
+            let batch = self.queued
+            self.queued = [:]
+            var specs: [CGWindowID: CGFloat] = [:]
+            for (id, aspect) in batch where self.inFlight.insert(id).inserted {
+                specs[id] = aspect
             }
+            await self.capture(specs)
         }
     }
 
     func discardMissing(keeping ids: Set<CGWindowID>) {
+        kept = ids
         images = images.filter { ids.contains($0.key) }
         fetchedAt = fetchedAt.filter { ids.contains($0.key) }
+        queued = queued.filter { ids.contains($0.key) }
     }
 
-    private nonisolated static func capture(windowID: CGWindowID, aspect: CGFloat) async -> CGImageBox? {
-        let height: CGFloat = 280
-        let width = max(160, min(520, height * aspect))
+    private func capture(_ specs: [CGWindowID: CGFloat]) async {
+        guard !specs.isEmpty else { return }
+        let batch = await Self.captureBatch(specs)
+        for id in specs.keys {
+            inFlight.remove(id)
+            guard kept?.contains(id) ?? true else { continue }
+            guard let box = batch.images[id] else { continue }
+            images[id] = NSImage(
+                cgImage: box.image,
+                size: NSSize(width: box.image.width, height: box.image.height)
+            )
+            fetchedAt[id] = Date()
+            lastError = nil
+        }
+        if batch.permissionDenied {
+            lastError = "Window previews need Screen Recording permission."
+        }
+    }
+
+    private struct CaptureBatch: Sendable {
+        var images: [CGWindowID: CGImageBox]
+        var permissionDenied: Bool
+    }
+
+    /// One window-server snapshot, then a capture for each window in that snapshot.
+    private nonisolated static func captureBatch(_ specs: [CGWindowID: CGFloat]) async -> CaptureBatch {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let window = content.windows.first(where: { $0.windowID == windowID }) else { return nil }
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            let configuration = SCStreamConfiguration()
-            configuration.width = Int(width * 2)
-            configuration.height = Int(height * 2)
-            configuration.scalesToFit = true
-            configuration.showsCursor = false
-            return try await captureImage(filter: filter, configuration: configuration)
-        } catch {
-            await MainActor.run {
-                ThumbnailService.shared.lastError = "Window previews need Screen Recording permission."
+            var images: [CGWindowID: CGImageBox] = [:]
+            for (windowID, aspect) in specs {
+                guard let window = content.windows.first(where: { $0.windowID == windowID }) else { continue }
+                let height: CGFloat = 280
+                let width = max(160, min(520, height * aspect))
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let configuration = SCStreamConfiguration()
+                configuration.width = Int(width * 2)
+                configuration.height = Int(height * 2)
+                configuration.scalesToFit = true
+                configuration.showsCursor = false
+                do {
+                    if let image = try await captureImage(filter: filter, configuration: configuration) {
+                        images[windowID] = image
+                    }
+                } catch {
+                    if !CGPreflightScreenCaptureAccess() {
+                        return CaptureBatch(images: images, permissionDenied: true)
+                    }
+                }
             }
-            return nil
+            return CaptureBatch(images: images, permissionDenied: false)
+        } catch {
+            return CaptureBatch(images: [:], permissionDenied: !CGPreflightScreenCaptureAccess())
         }
     }
 

@@ -61,16 +61,51 @@ enum DockController {
         Log.info("Restored the macOS Dock")
     }
 
+    /// True when the Dock is visible or its autohide delay is not the value DockBar sets.
+    nonisolated static func needsDockHide(autohide: String, delay: Double) -> Bool {
+        !(autohide == "1" && abs(delay - 1000) < 0.5)
+    }
+
     /// Re-hides the Dock if something else (such as Control-Option-D) shows it again.
     static func enforceHidden() {
         guard UserDefaults.standard.bool(forKey: hidingKey) else { return }
         let autohide = readDock("autohide")
         let delay = Double(readDock("autohide-delay")) ?? -1
-        if autohide == "1" && abs(delay - 1000) < 0.5 { return }
+        guard needsDockHide(autohide: autohide, delay: delay) else { return }
         runDefaults(["write", "com.apple.dock", "autohide", "-bool", "true"])
         runDefaults(["write", "com.apple.dock", "autohide-delay", "-float", "1000"])
         restartDock()
         Log.info("Hid the macOS Dock")
+    }
+
+    /// Reads Dock defaults off the main actor, then hides the Dock only when the values differ.
+    static func enforceHiddenInBackground() {
+        guard UserDefaults.standard.bool(forKey: hidingKey) else { return }
+        Task.detached {
+            let autohide = Self.readDockOffMain("autohide")
+            let delay = Double(Self.readDockOffMain("autohide-delay")) ?? -1
+            guard Self.needsDockHide(autohide: autohide, delay: delay) else { return }
+            await MainActor.run {
+                Self.enforceHidden()
+            }
+        }
+    }
+
+    private nonisolated static func readDockOffMain(_ key: String) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = ["read", "com.apple.dock", key]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return ""
+        }
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private static func readDock(_ key: String) -> String {

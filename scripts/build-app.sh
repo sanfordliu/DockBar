@@ -36,6 +36,20 @@ echo "Signing with $IDENTITY"
 codesign --force --sign "$IDENTITY" --identifier com.sanfordliu.DockBar "$APP"
 
 mkdir -p "$HOME/Applications"
+if pgrep -x DockBar >/dev/null 2>&1; then
+  echo "Quitting DockBar so it can restore the Dock..."
+  killall DockBar 2>/dev/null || true
+  for _ in $(seq 1 25); do
+    if ! pgrep -x DockBar >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  if pgrep -x DockBar >/dev/null 2>&1; then
+    echo "DockBar is still running. Quit it, then run this script again." >&2
+    exit 1
+  fi
+fi
 rm -rf "$HOME/Applications/DockBar.app"
 cp -R "$APP" "$HOME/Applications/DockBar.app"
 echo "Installed ~/Applications/DockBar.app"

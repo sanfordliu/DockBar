@@ -65,6 +65,10 @@ struct DockBarTests {
     @Test func coordinatesAndWindowRecords() {
         let height = ScreenCoordinates.primaryHeight
         #expect(height > 0)
+        #expect(ScreenCoordinates.resolvedPrimaryHeight(originZeroHeight: 800, cached: 100) == 800)
+        #expect(ScreenCoordinates.resolvedPrimaryHeight(originZeroHeight: nil, cached: 100) == 100)
+        #expect(ScreenCoordinates.resolvedPrimaryHeight(originZeroHeight: 0, cached: 100) == 100)
+        #expect(ScreenCoordinates.hasPrimaryScreen)
         let original = CGRect(x: 40, y: 80, width: 300, height: 200)
         let roundTrip = ScreenCoordinates.appKit(fromCGTopLeft: ScreenCoordinates.cgTopLeft(fromAppKit: original))
         #expect(abs(roundTrip.minX - original.minX) < 0.1)
@@ -149,6 +153,13 @@ struct DockBarTests {
         #expect(IconCache.shared.trashIcon(isFull: true).size.width > 0)
         Log.info("test info")
         Log.error("test error")
+        Log.error("test path", path: "/Users/example/file.txt")
+        #expect(Permissions.screenCaptureStep(alreadyPrompted: false, granted: false) == .requestAccess)
+        #expect(Permissions.screenCaptureStep(alreadyPrompted: true, granted: false) == .openSettings)
+        #expect(Permissions.screenCaptureStep(alreadyPrompted: true, granted: true) == nil)
+        #expect(!DockController.needsDockHide(autohide: "1", delay: 1000))
+        #expect(DockController.needsDockHide(autohide: "0", delay: 1000))
+        #expect(DockController.needsDockHide(autohide: "1", delay: 0.4))
         _ = Permissions.isAccessibilityTrusted
         _ = Permissions.isScreenCaptureGranted
         #expect(BarWindows.previewLevel.rawValue == BarWindows.barLevel.rawValue + 1)
@@ -227,8 +238,21 @@ struct DockBarTests {
             ax.scheduleRefresh()
         }
         let probe = AXUIElementCreateApplication(1)
-        #expect(ax.copyWindows(pid: 1).isEmpty)
-        #expect(ax.copyWindows(pid: 1).isEmpty)
+        let firstCopy = ax.copyWindows(pid: 1)
+        #expect(firstCopy.windows.isEmpty)
+        let secondCopy = ax.copyWindows(pid: 1)
+        #expect(secondCopy.windows.isEmpty)
+        if firstCopy.failed {
+            #expect(secondCopy.failed)
+        }
+        #expect(AXWindowService.shouldLeaveFullScreenAlone(true))
+        #expect(!AXWindowService.shouldLeaveFullScreenAlone(false))
+        let remembered = AXUIElementCreateApplication(0)
+        ax.remember(remembered, windowID: 999, pid: 0)
+        let mutations = AXWindowService.mutationCount
+        AXWindowService.systemChangesAllowed = false
+        ax.move(windowID: 999, pid: 0, to: .zero, currentCG: .zero)
+        #expect(AXWindowService.mutationCount == mutations)
         ax.setFrame(.zero, element: probe, currentCG: .zero)
         let only = CGWindowRecord(
             windowID: 70, ownerPID: 1, title: "Only",
@@ -243,6 +267,7 @@ struct DockBarTests {
             displayID: screen.displayID, isOnScreen: true
         )
         #expect(ax.match(probe, pid: 1, title: "", records: [only]) == 70)
+        #expect(ax.match(probe, pid: 1, title: "", records: [only], allowSingleCandidate: false) == nil)
         #expect(ax.match(probe, pid: 1, title: "Other", records: [only, other]) == 71)
         #expect(ax.match(probe, pid: 1, title: "", records: [only, other]) == nil)
         ax.ensureObserving(1)
@@ -381,20 +406,30 @@ struct DockBarTests {
         #expect(model.hoveredAppID == calc.id)
         model.beginDrag(id: edit.id, displayID: screen.displayID)
         #expect(model.hoveredAppID == nil)
-        model.updateDrag(dx: model.settings.iconStride * 0.4, mouse: away)
+        let stride = model.settings.iconStride
+        model.updateDrag(dx: stride * 0.4, mouse: away)
         #expect(!model.trashDragHover)
-        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
-        model.updateDrag(dx: -model.settings.iconStride * 0.4, mouse: away)
-        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
-        model.updateDrag(dx: model.settings.iconStride, mouse: away)
-        #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) != 0)
-        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
+        #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) == stride * 0.4)
+        #expect(model.dragOffset(for: row.first { $0.id == calc.id }!, displayID: screen.displayID) == 0)
+        model.setHoveredApp(calc.id)
+        #expect(model.hoveredAppID == nil)
+        model.updateDrag(dx: stride, mouse: away)
+        #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) == stride)
+        #expect(model.dragOffset(for: row.first { $0.id == calc.id }!, displayID: screen.displayID) == -stride)
+        model.updateDrag(dx: stride * 5, mouse: away)
+        #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) == stride * 5)
+        let trash = CGPoint(x: floating.maxX - 4, y: floating.midY)
+        model.updateDrag(dx: stride * 5, mouse: trash)
+        #expect(model.trashDragHover)
+        #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) == stride * 5)
+        #expect(model.dragOffset(for: row.first { $0.id == calc.id }!, displayID: screen.displayID) == -stride)
+        model.updateDrag(dx: stride, mouse: away)
+        #expect(!model.trashDragHover)
         model.endDrag(at: away)
         let reordered = model.entries(for: screen.displayID).filter(\.isPinned).map(\.id)
         #expect(reordered.last == edit.id)
 
         model.beginDrag(id: calc.id, displayID: screen.displayID)
-        let trash = CGPoint(x: floating.maxX - 4, y: floating.midY)
         model.updateDrag(dx: 0, mouse: trash)
         #expect(model.trashDragHover)
         model.endDrag(at: trash)
@@ -464,6 +499,13 @@ struct DockBarTests {
         let elsewhere = window(id: 200, pid: 50, title: "Away", height: 300, display: nil, minimized: false)
         model.loadSnapshot(apps: [50: editApp], windows: [elsewhere])
         #expect(!model.placeWindow(pid: 50, on: screen.displayID, previous: [], moveExisting: false))
+        let otherDisplay = screen.displayID &+ 1
+        let awayWindow = window(id: 210, pid: 50, title: "Other display", height: 300, display: otherDisplay, minimized: false)
+        model.loadSnapshot(apps: [50: editApp], windows: [awayWindow])
+        #expect(!model.placeWindow(pid: 50, on: screen.displayID, previous: [210], moveExisting: false))
+        #expect(model.relocatedWindowID == nil)
+        #expect(!model.placeWindow(pid: 50, on: screen.displayID, previous: [210], moveExisting: true))
+        #expect(model.relocatedWindowID == 210)
         let here = window(id: 201, pid: 50, title: "Here", height: 300, display: screen.displayID, minimized: false)
         model.loadSnapshot(apps: [50: editApp], windows: [here])
         #expect(!model.placeWindow(pid: 50, on: screen.displayID, previous: [201], moveExisting: false))
@@ -505,6 +547,30 @@ struct DockBarTests {
         )
         model.primaryClick(many, displayID: screen.displayID, anchor: CGRect(x: screen.frame.midX, y: screen.frame.minY, width: 40, height: 40))
         PreviewCoordinator.shared.hide()
+
+        model.settings.style = .floating
+        model.settings.showFinder = true
+        model.settings.showTrash = true
+        model.settings.showPinnedOnAllScreens = true
+        let barScreen = NSScreen.screens.first { $0.frame.origin == .zero } ?? screen
+        model.loadSnapshot(
+            pins: [
+                pin(path: finderPath, bundle: TaskbarModel.finderBundleID, name: "Finder"),
+                pin(path: textEditPath, bundle: "com.apple.TextEdit", name: "TextEdit"),
+                pin(path: calcPath, bundle: "com.apple.calculator", name: "Calculator"),
+            ]
+        )
+        model.dropDisplay = barScreen.displayID
+        model.dropVisualIndex = 1
+        let gapped = model.panelFrame(for: barScreen)
+        #expect(gapped.minX >= barScreen.frame.minX - 0.5)
+        #expect(gapped.maxX <= barScreen.frame.maxX + 0.5)
+        #expect(abs(gapped.midX - barScreen.frame.midX) < 1)
+        let iconStride = model.settings.iconStride
+        let gapStart = gapped.minX + BarLayout.edgeInset + iconStride + BarLayout.dividerWidth
+        let gapCenter = CGPoint(x: gapStart + iconStride / 2, y: gapped.midY)
+        #expect(model.visualPinInsertIndex(at: gapCenter) == 1)
+        model.clearDropTarget()
     }
 
     @Test func thumbnailsPreviewAndHighlight() {
@@ -567,6 +633,7 @@ struct DockBarTests {
         content.addSubview(trash)
         #expect(content.hitTest(NSPoint(x: 190, y: 20)) === trash)
         #expect(content.hitTest(NSPoint(x: 4, y: 4)) != nil)
+        #expect(content.hitTest(NSPoint(x: 4, y: 46)) == nil)
         #expect(content.hitTest(NSPoint(x: -1, y: -1)) == nil)
         content.resetCursorRects()
         let moved = try mouseEvent(.leftMouseDown, at: NSPoint(x: 4, y: 4), window: 0)
@@ -645,6 +712,18 @@ struct DockBarTests {
         click.mouseDown(with: down)
         click.mouseUp(with: up)
         #expect(clicks == 1)
+        var buttonDown = true
+        click.leftButtonIsDown = {
+            let down = buttonDown
+            buttonDown = false
+            return down
+        }
+        click.trackingEvent = { _ in nil }
+        click.mouseDown(with: down)
+        click.mouseUp(with: up)
+        #expect(clicks == 2)
+        click.leftButtonIsDown = { NSEvent.pressedMouseButtons & 1 != 0 }
+        click.trackingEvent = nil
         let dragDown = try mouseEvent(.leftMouseDown, at: NSPoint(x: 4, y: 4), window: window.windowNumber)
         let dragged = try mouseEvent(.leftMouseDragged, at: NSPoint(x: 30, y: 4), window: window.windowNumber)
         click.mouseDown(with: dragDown)
@@ -709,7 +788,9 @@ struct DockBarTests {
         #expect(names["Default"] == "Personal")
         #expect(names["Profile 1"] == "Work")
         #expect(BrowserProfile.profileNames(in: Data("{}".utf8)).isEmpty)
-        #expect(BrowserProfile.displayName(name: "Person 1", userName: "work@example.com", gaiaName: nil) == "work@example.com")
+        #expect(BrowserProfile.displayName(name: "Person 1", userName: "work@example.com", gaiaName: nil) == "Person 1")
+        #expect(BrowserProfile.displayName(name: "Person 1", userName: "work@example.com", gaiaName: "Ada") == "Ada")
+        #expect(BrowserProfile.displayName(name: "Person 1", userName: "work@example.com", gaiaName: "ada@example.com") == "Person 1")
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("profiles-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -773,6 +854,8 @@ struct DockBarTests {
         #expect(BrowserProfile.firefoxName(arguments: ["firefox", "-profile", "/Users/me/xyz.work"], profilesIni: ini) == "Work")
         #expect(BrowserProfile.firefoxName(arguments: ["firefox"], profilesIni: ini) == "Personal")
         #expect(BrowserProfile.firefoxName(arguments: ["firefox", "-P", "Only"], profilesIni: "Name=Only\nPath=one\n") == nil)
+        #expect(BrowserProfile.firefoxName(arguments: ["firefox", "-ProfileManager"], profilesIni: ini) == "Personal")
+        #expect(BrowserProfile.firefoxName(arguments: ["firefox", "-ProfileManager"], profilesIni: ini) != "rofileManager")
 
         #expect(BrowserProfile.pageTitle(
             "Inbox - Work - Google Chrome",
@@ -888,27 +971,6 @@ struct DockBarTests {
     }
 
     private var calcPath: String { "/System/Applications/Calculator.app" }
-}
-
-@MainActor
-private func pinnedSlotsDisjoint(_ model: TaskbarModel, displayID: CGDirectDisplayID) -> Bool {
-    let stride = model.settings.iconStride
-    var x: CGFloat = 0
-    var slots: [CGRect] = []
-    for item in model.entries(for: displayID) {
-        let left = x + model.dragOffset(for: item, displayID: displayID)
-        slots.append(CGRect(x: left, y: 0, width: stride, height: 10))
-        x += stride
-        if model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID {
-            x += BarLayout.dividerWidth
-        }
-    }
-    for index in slots.indices {
-        for other in slots.indices where other > index {
-            if slots[index].insetBy(dx: 0.5, dy: 0.5).intersects(slots[other]) { return false }
-        }
-    }
-    return true
 }
 
 private func freshDefaults() -> UserDefaults {

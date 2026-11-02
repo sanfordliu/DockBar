@@ -9,12 +9,18 @@ final class ScreenManager: NSObject {
 
     func start() {
         BarCursor.allowBackgroundCursor()
-        layout()
+        layout(orderFront: true)
         installCursorTimer()
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(layout),
+            selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(spaceChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil
         )
         TaskbarModel.shared.onChange = { [weak self] in
@@ -23,6 +29,18 @@ final class ScreenManager: NSObject {
     }
 
     @objc func layout() {
+        layout(orderFront: false)
+    }
+
+    @objc private func screensChanged() {
+        layout(orderFront: true)
+    }
+
+    @objc private func spaceChanged() {
+        bringForward()
+    }
+
+    private func layout(orderFront: Bool) {
         let screens = NSScreen.screens
         let ids = Set(screens.map(\.displayID))
         for id in bars.keys where !ids.contains(id) {
@@ -32,7 +50,7 @@ final class ScreenManager: NSObject {
         for screen in screens {
             let id = screen.displayID
             if let bar = bars[id] {
-                bar.layout(on: screen, model: .shared)
+                bar.layout(on: screen, model: .shared, orderFront: orderFront)
             } else {
                 let bar = BarController(screen: screen, model: .shared)
                 bars[id] = bar
@@ -64,6 +82,12 @@ final class ScreenManager: NSObject {
     func bringForward() {
         for bar in bars.values {
             bar.bringForward()
+        }
+    }
+
+    func bringForwardIfNeeded() {
+        for bar in bars.values {
+            bar.bringForwardIfNeeded()
         }
     }
 

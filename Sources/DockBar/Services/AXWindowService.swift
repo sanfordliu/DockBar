@@ -10,9 +10,12 @@ final class AXElementBox: @unchecked Sendable {
 private final class AXHub: @unchecked Sendable {
     static let shared = AXHub()
 
-    func handle(notification: String) {
+    func handle(notification: String, element: AXElementBox) {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
+                if notification == kAXUIElementDestroyedNotification as String {
+                    AXWindowService.shared.forgetDestroyed(element.element)
+                }
                 AXWindowService.shared.scheduleRefresh()
             }
         }
@@ -25,7 +28,7 @@ private func axObserverCallback(
     _ notification: CFString,
     _ refcon: UnsafeMutableRawPointer?
 ) {
-    AXHub.shared.handle(notification: notification as String)
+    AXHub.shared.handle(notification: notification as String, element: AXElementBox(element))
 }
 
 @MainActor
@@ -39,11 +42,29 @@ final class AXWindowService {
     private var observers: [pid_t: AXObserver] = [:]
     private var observedWindows: [CGWindowID: pid_t] = [:]
     private var elements: [CGWindowID: AXUIElement] = [:]
+    private var elementPID: [CGWindowID: pid_t] = [:]
     private var lastDisplay: [CGWindowID: CGDirectDisplayID] = [:]
     private var backoffUntil: [pid_t: Date] = [:]
     private var fittedAt: [CGWindowID: Date] = [:]
     private var fitStrikes: [CGWindowID: (count: Int, at: Date)] = [:]
     private var refreshTask: Task<Void, Never>?
+
+    /// Counts real accessibility writes. Tests check that a disabled service does not increment it.
+    private(set) static var mutationCount = 0
+
+    private static let windowNotificationNames: [CFString] = [
+        kAXWindowMovedNotification as CFString,
+        kAXWindowResizedNotification as CFString,
+        kAXWindowMiniaturizedNotification as CFString,
+        kAXWindowDeminiaturizedNotification as CFString,
+        kAXUIElementDestroyedNotification as CFString,
+        kAXTitleChangedNotification as CFString,
+    ]
+
+    /// Space fullscreen covers the bar on its own space. Zoomed windows are the ones that should shrink.
+    static func shouldLeaveFullScreenAlone(_ isFullScreen: Bool) -> Bool {
+        isFullScreen
+    }
 
     func scheduleRefresh() {
         refreshTask?.cancel()
@@ -74,14 +95,35 @@ final class AXWindowService {
         }
 
         var freshElements: [CGWindowID: AXUIElement] = [:]
+        var freshPIDs: [CGWindowID: pid_t] = [:]
+        var failedPIDs = Set<pid_t>()
         for (pid, app) in apps where !app.isHidden {
             ensureObserving(pid)
-            for element in copyWindows(pid: pid) {
+            let copy = copyWindows(pid: pid)
+            if copy.failed {
+                failedPIDs.insert(pid)
+                for (id, element) in elements where elementPID[id] == pid {
+                    freshElements[id] = element
+                    freshPIDs[id] = pid
+                }
+                continue
+            }
+            let allowSingleCandidate = copy.windows.count == 1
+            for element in copy.windows {
                 let minimized = AXRead.bool(element, kAXMinimizedAttribute as CFString)
                 let title = AXRead.string(element, kAXTitleAttribute as CFString) ?? ""
-                let identifier = AXPrivate.windowID(for: element) ?? match(element, pid: pid, title: title, records: records)
+                let privateID = AXPrivate.windowID(for: element)
+                let identifier = privateID ?? match(
+                    element,
+                    pid: pid,
+                    title: title,
+                    records: records,
+                    allowSingleCandidate: allowSingleCandidate
+                )
                 guard let identifier else { continue }
+                if privateID == nil, freshElements[identifier] != nil { continue }
                 freshElements[identifier] = element
+                freshPIDs[identifier] = pid
                 observeWindow(element, id: identifier, pid: pid)
                 if var existing = byID[identifier] {
                     if !title.isEmpty { existing.title = title }
@@ -111,7 +153,16 @@ final class AXWindowService {
                 }
             }
         }
+        let liveIDs = Set(byID.keys).union(freshElements.keys)
+        for id in Array(observedWindows.keys) where !liveIDs.contains(id) {
+            if let pid = observedWindows[id], failedPIDs.contains(pid) { continue }
+            unobserve(id)
+        }
+        for id in lastDisplay.keys where !liveIDs.contains(id) { lastDisplay[id] = nil }
+        for id in fittedAt.keys where !liveIDs.contains(id) { fittedAt[id] = nil }
+        for id in fitStrikes.keys where !liveIDs.contains(id) { fitStrikes[id] = nil }
         elements = freshElements
+        elementPID = freshPIDs
 
         return byID.values
             .filter { $0.isOnScreen || $0.isMinimized }
@@ -127,8 +178,8 @@ final class AXWindowService {
         if let identifier = AXPrivate.windowID(for: focused) { return identifier }
         let title = AXRead.string(focused, kAXTitleAttribute as CFString) ?? ""
         guard !title.isEmpty else { return nil }
-        return elements.first { _, element in
-            AXRead.string(element, kAXTitleAttribute as CFString) == title
+        return elements.first { id, element in
+            elementPID[id] == pid && AXRead.string(element, kAXTitleAttribute as CFString) == title
         }?.key
     }
 
@@ -164,7 +215,9 @@ final class AXWindowService {
     }
 
     func move(windowID: CGWindowID, pid: pid_t, to appKitFrame: CGRect, currentCG: CGRect) {
+        guard Self.systemChangesAllowed, ScreenCoordinates.hasPrimaryScreen else { return }
         guard let element = elements[windowID] else { return }
+        Self.mutationCount += 1
         if AXRead.bool(element, kAXMinimizedAttribute as CFString) {
             AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
@@ -176,9 +229,10 @@ final class AXWindowService {
         focus(windowID: windowID, pid: pid)
     }
 
-    /// Pulls a window that fills the screen down to the top of the bar, the way the Dock's reserved area does.
+    /// Pulls a zoomed window that fills the screen down to the top of the bar.
+    /// A window in its own fullscreen space is left alone.
     func fitMaximized(_ windows: [WindowInfo], occupiedHeight: CGFloat) {
-        guard Self.systemChangesAllowed, Permissions.isAccessibilityTrusted else { return }
+        guard Self.systemChangesAllowed, Permissions.isAccessibilityTrusted, ScreenCoordinates.hasPrimaryScreen else { return }
         let now = Date()
         for window in windows where window.isOnScreen && !window.isMinimized {
             guard let element = elements[window.windowID],
@@ -187,18 +241,7 @@ final class AXWindowService {
                   let target = workAreaFrame(for: window.frame, screen: screen, occupiedHeight: occupiedHeight)
             else { continue }
             guard shouldFit(window.windowID, now: now) else { continue }
-
-            if AXRead.bool(element, "AXFullScreen" as CFString) {
-                AXUIElementSetAttributeValue(element, "AXFullScreen" as CFString, kCFBooleanFalse)
-                noteFitAttempt(window.windowID, now: now)
-                let box = AXElementBox(element)
-                let cgFrame = window.cgFrame
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(450))
-                    self.setFrame(target, element: box.element, currentCG: cgFrame)
-                }
-                continue
-            }
+            if Self.shouldLeaveFullScreenAlone(AXRead.bool(element, "AXFullScreen" as CFString)) { continue }
 
             setFrame(target, element: element, currentCG: window.cgFrame)
             noteFitAttempt(window.windowID, now: now)
@@ -276,19 +319,33 @@ final class AXWindowService {
             + abs(a.width - b.width) + abs(a.height - b.height)
     }
 
-    func copyWindows(pid: pid_t) -> [AXUIElement] {
-        if let until = backoffUntil[pid], until > Date() { return [] }
+    struct AXWindowCopy {
+        var windows: [AXUIElement]
+        /// True when the copy timed out or was skipped. The previous handles for this process stay in use.
+        var failed: Bool
+    }
+
+    func copyWindows(pid: pid_t) -> AXWindowCopy {
+        if let until = backoffUntil[pid], until > Date() {
+            return AXWindowCopy(windows: [], failed: true)
+        }
         let application = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application, 0.12)
         guard let value = AXRead.copy(application, kAXWindowsAttribute as CFString) else {
             backoffUntil[pid] = Date().addingTimeInterval(2)
-            return []
+            return AXWindowCopy(windows: [], failed: true)
         }
         backoffUntil[pid] = nil
-        return value as? [AXUIElement] ?? []
+        return AXWindowCopy(windows: value as? [AXUIElement] ?? [], failed: false)
     }
 
-    func match(_ element: AXUIElement, pid: pid_t, title: String, records: [CGWindowRecord]) -> CGWindowID? {
+    func match(
+        _ element: AXUIElement,
+        pid: pid_t,
+        title: String,
+        records: [CGWindowRecord],
+        allowSingleCandidate: Bool = true
+    ) -> CGWindowID? {
         let candidates = records.filter { $0.ownerPID == pid }
         if let origin = AXRead.point(element, kAXPositionAttribute as CFString),
            let size = AXRead.size(element, kAXSizeAttribute as CFString) {
@@ -302,8 +359,17 @@ final class AXWindowService {
         if !title.isEmpty, let hit = candidates.first(where: { $0.title == title }) {
             return hit.windowID
         }
-        if candidates.count == 1 { return candidates[0].windowID }
+        if allowSingleCandidate, candidates.count == 1 { return candidates[0].windowID }
         return nil
+    }
+
+    func hasElement(for windowID: CGWindowID) -> Bool {
+        elements[windowID] != nil
+    }
+
+    func remember(_ element: AXUIElement, windowID: CGWindowID, pid: pid_t) {
+        elements[windowID] = element
+        elementPID[windowID] = pid
     }
 
     func ensureObserving(_ pid: pid_t) {
@@ -330,24 +396,38 @@ final class AXWindowService {
     func observeWindow(_ element: AXUIElement, id: CGWindowID, pid: pid_t) {
         guard Self.systemChangesAllowed else { return }
         guard observedWindows[id] == nil, let observer = observers[pid] else { return }
-        let names = [
-            kAXWindowMovedNotification,
-            kAXWindowResizedNotification,
-            kAXWindowMiniaturizedNotification,
-            kAXWindowDeminiaturizedNotification,
-            kAXUIElementDestroyedNotification,
-            kAXTitleChangedNotification,
-        ]
-        for name in names {
-            AXObserverAddNotification(observer, element, name as CFString, nil)
+        for name in Self.windowNotificationNames {
+            AXObserverAddNotification(observer, element, name, nil)
         }
         observedWindows[id] = pid
     }
 
+    func forgetDestroyed(_ element: AXUIElement) {
+        let ids = elements.compactMap { id, stored in CFEqual(stored, element) ? id : nil }
+        for id in ids {
+            unobserve(id)
+        }
+    }
+
+    func unobserve(_ id: CGWindowID) {
+        let pid = observedWindows.removeValue(forKey: id)
+        if let pid, let observer = observers[pid], let element = elements[id] {
+            for name in Self.windowNotificationNames {
+                AXObserverRemoveNotification(observer, element, name)
+            }
+        }
+        elements[id] = nil
+        elementPID[id] = nil
+        lastDisplay[id] = nil
+        fittedAt[id] = nil
+        fitStrikes[id] = nil
+    }
+
     func stopObserving(_ pid: pid_t) {
+        let ids = observedWindows.compactMap { id, owner in owner == pid ? id : nil }
+        for id in ids { unobserve(id) }
         guard let observer = observers.removeValue(forKey: pid) else { return }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
-        observedWindows = observedWindows.filter { $0.value != pid }
     }
 }
 

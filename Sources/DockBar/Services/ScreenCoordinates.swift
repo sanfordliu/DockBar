@@ -8,10 +8,31 @@ extension NSScreen {
 }
 
 enum ScreenCoordinates {
+    private static let heightLock = NSLock()
+    nonisolated(unsafe) private static var cachedPrimaryHeight: CGFloat = 0
+
+    static var hasPrimaryScreen: Bool {
+        NSScreen.screens.contains { $0.frame.origin == .zero }
+    }
+
+    /// Uses the AppKit primary display. When that screen is missing during a display change,
+    /// the last known height stays in place so stacked displays do not shift every window.
+    static func resolvedPrimaryHeight(originZeroHeight: CGFloat?, cached: CGFloat) -> CGFloat {
+        if let originZeroHeight, originZeroHeight > 0 { return originZeroHeight }
+        return cached
+    }
+
     static var primaryHeight: CGFloat {
-        NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height
-            ?? NSScreen.screens.map(\.frame.maxY).max()
-            ?? 0
+        heightLock.lock()
+        defer { heightLock.unlock() }
+        let height = resolvedPrimaryHeight(
+            originZeroHeight: NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height,
+            cached: cachedPrimaryHeight
+        )
+        if hasPrimaryScreen {
+            cachedPrimaryHeight = height
+        }
+        return height
     }
 
     static func appKit(fromCGTopLeft rect: CGRect) -> CGRect {

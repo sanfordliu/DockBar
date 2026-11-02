@@ -34,18 +34,18 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
   -out "$WORK/cert.pem" \
   -config "$WORK/cert.conf" >/dev/null 2>&1
 
+PASS="$(openssl rand -base64 24 | tr -d '\n')"
 openssl pkcs12 -export \
   -out "$WORK/cert.p12" \
   -inkey "$WORK/key.pem" \
   -in "$WORK/cert.pem" \
-  -passout pass:dockbar >/dev/null 2>&1
+  -passout "pass:${PASS}" >/dev/null 2>&1
 
+# No -A: only codesign may use this key, so another local app cannot sign as DockBar.
 security import "$WORK/cert.p12" \
   -k "$KEYCHAIN" \
-  -P dockbar \
-  -A \
-  -T /usr/bin/codesign \
-  -T /usr/bin/security >/dev/null
+  -P "$PASS" \
+  -T /usr/bin/codesign >/dev/null
 
 # User trust settings, so codesign accepts the certificate without an admin password.
 security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$WORK/cert.pem"

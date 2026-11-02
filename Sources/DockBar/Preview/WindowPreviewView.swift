@@ -95,9 +95,11 @@ private struct WindowCard: View {
         )
         .onHover { inside in
             hovered = inside
-            PreviewCoordinator.shared.cancelHide()
-            if inside, !window.isMinimized {
-                WindowHighlight.shared.show(frame: window.frame)
+            if inside {
+                PreviewCoordinator.shared.cancelHide()
+                if !window.isMinimized {
+                    WindowHighlight.shared.show(frame: window.frame)
+                }
             } else {
                 WindowHighlight.shared.hide()
             }

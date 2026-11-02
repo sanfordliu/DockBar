@@ -12,6 +12,26 @@ final class TrashService {
     private var source: DispatchSourceFileSystemObject?
     private var descriptor: Int32 = -1
     private var refreshTask: Task<Void, Never>?
+    private var finderGeneration = 0
+
+    private struct ScriptResult: Sendable {
+        var value: Int32
+        var errorCode: Int?
+        var failed: Bool
+    }
+
+    private nonisolated static func runScript(_ source: String) async -> ScriptResult {
+        await Task.detached(priority: .utility) {
+            let script = NSAppleScript(source: source)
+            var error: NSDictionary?
+            let result = script?.executeAndReturnError(&error)
+            if let error {
+                let code = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue
+                return ScriptResult(value: 0, errorCode: code, failed: true)
+            }
+            return ScriptResult(value: result?.int32Value ?? 0, errorCode: nil, failed: false)
+        }.value
+    }
 
     func start() {
         refreshLocal()
@@ -30,19 +50,20 @@ final class TrashService {
     }
 
     func empty() {
-        let script = NSAppleScript(source: "tell application \"Finder\" to empty trash")
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
-        if error != nil {
-            automationDenied = true
-            Log.error("Empty Trash was not allowed")
-        } else {
-            automationDenied = false
-            finderSucceeded = true
-            UserDefaults.standard.set(true, forKey: "finderAutomationOK")
+        Task { @MainActor in
+            let outcome = await Self.runScript("tell application \"Finder\" to empty trash")
+            if outcome.failed {
+                self.automationDenied = true
+                Log.error("Empty Trash was not allowed")
+            } else {
+                self.automationDenied = false
+                self.finderSucceeded = true
+                UserDefaults.standard.set(true, forKey: "finderAutomationOK")
+            }
+            self.refreshLocal()
+            TaskbarModel.shared.noteTrashCount(self.count)
+            self.refreshFromFinder()
         }
-        refreshLocal()
-        TaskbarModel.shared.noteTrashCount(count)
     }
 
     enum DropAction: Equatable {
@@ -65,12 +86,12 @@ final class TrashService {
                 do {
                     try NSWorkspace.shared.unmountAndEjectDevice(at: url)
                 } catch {
-                    Log.error("Could not eject \(url.lastPathComponent): \(error.localizedDescription)")
+                    Log.error("Could not eject volume: \(error.localizedDescription)", path: url.path)
                 }
             case .trash:
                 trash(urls: [url])
             case .ignore:
-                Log.error("Left volume \(url.lastPathComponent) in place")
+                Log.error("Left volume in place", path: url.path)
             }
         }
     }
@@ -91,7 +112,7 @@ final class TrashService {
             do {
                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
             } catch {
-                Log.error("Could not trash \(url.path): \(error.localizedDescription)")
+                Log.error("Could not trash item: \(error.localizedDescription)", path: url.path)
             }
         }
         scheduleRefresh()
@@ -125,20 +146,22 @@ final class TrashService {
     }
 
     private func refreshFromFinder() {
-        let script = NSAppleScript(source: "tell application \"Finder\" to count items of trash")
-        var error: NSDictionary?
-        let result = script?.executeAndReturnError(&error)
-        if let error {
-            let code = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
-            if code == -1743 { automationDenied = true }
-            refreshLocal()
-            return
+        finderGeneration += 1
+        let generation = finderGeneration
+        Task { @MainActor in
+            let outcome = await Self.runScript("tell application \"Finder\" to count items of trash")
+            guard generation == self.finderGeneration else { return }
+            if outcome.failed {
+                if outcome.errorCode == -1743 { self.automationDenied = true }
+                self.refreshLocal()
+                return
+            }
+            self.automationDenied = false
+            self.finderSucceeded = true
+            UserDefaults.standard.set(true, forKey: "finderAutomationOK")
+            self.count = Int(outcome.value)
+            TaskbarModel.shared.noteTrashCount(self.count)
         }
-        automationDenied = false
-        finderSucceeded = true
-        UserDefaults.standard.set(true, forKey: "finderAutomationOK")
-        count = Int(result?.int32Value ?? 0)
-        TaskbarModel.shared.noteTrashCount(count)
     }
 
     private func refreshLocal() {

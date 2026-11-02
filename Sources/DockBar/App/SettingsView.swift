@@ -10,6 +10,7 @@ struct SettingsView: View {
 private struct SettingsForm: View {
     @Bindable var settings: BarSettings
     @State private var loginError: String?
+    @State private var loginStatus = SMAppService.mainApp.status
 
     var body: some View {
         ScrollView {
@@ -49,7 +50,7 @@ private struct SettingsForm: View {
 
                 Section("Startup") {
                     Toggle("Launch DockBar at login", isOn: launchBinding)
-                    if SMAppService.mainApp.status == .requiresApproval {
+                    if loginStatus == .requiresApproval {
                         Text("macOS is waiting for you to allow DockBar in System Settings → General → Login Items.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -73,11 +74,12 @@ private struct SettingsForm: View {
             .formStyle(.grouped)
         }
         .frame(width: 560, height: 640)
+        .onAppear { loginStatus = SMAppService.mainApp.status }
     }
 
     private var launchBinding: Binding<Bool> {
         Binding(
-            get: { SMAppService.mainApp.status == .enabled },
+            get: { loginStatus == .enabled || loginStatus == .requiresApproval },
             set: { enabled in
                 do {
                     if enabled {
@@ -89,12 +91,15 @@ private struct SettingsForm: View {
                 } catch {
                     loginError = error.localizedDescription
                 }
+                loginStatus = SMAppService.mainApp.status
             }
         )
     }
 }
 
 private struct PermissionRows: View {
+    @State private var promptedScreenCapture = false
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             VStack(alignment: .leading, spacing: 10) {
@@ -112,11 +117,20 @@ private struct PermissionRows: View {
                     name: "Screen Recording",
                     detail: "Show window previews.",
                     granted: Permissions.isScreenCaptureGranted,
-                    actionTitle: "Grant",
+                    actionTitle: promptedScreenCapture ? "Open Settings" : "Grant",
                     action: {
                         SettingsWindowController.shared.yieldToSystemUI()
-                        if !Permissions.requestScreenCapture() {
+                        switch Permissions.screenCaptureStep(
+                            alreadyPrompted: promptedScreenCapture,
+                            granted: Permissions.isScreenCaptureGranted
+                        ) {
+                        case .requestAccess:
+                            promptedScreenCapture = true
+                            _ = Permissions.requestScreenCapture()
+                        case .openSettings:
                             Permissions.openPrivacyPane("Privacy_ScreenCapture")
+                        case nil:
+                            break
                         }
                     }
                 )

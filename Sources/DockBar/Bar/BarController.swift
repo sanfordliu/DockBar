@@ -13,12 +13,28 @@ final class BarController {
         panel.applyChrome(floating: model.settings.style == .floating)
     }
 
-    func layout(on screen: NSScreen, model: TaskbarModel) {
+    func layout(on screen: NSScreen, model: TaskbarModel, orderFront: Bool = false) {
         let frame = model.panelFrame(for: screen)
-        if panel.frame.integral != frame.integral {
+        let frameChanged = panel.frame.integral != frame.integral
+        if frameChanged {
             panel.setFrame(frame, display: true)
         }
         panel.applyChrome(floating: model.settings.style == .floating)
+        if frameChanged {
+            BarHitShape.apply(to: panel)
+        }
+        if orderFront {
+            bringForward()
+        } else {
+            bringForwardIfNeeded()
+        }
+    }
+
+    func bringForwardIfNeeded() {
+        guard panel.level != BarWindows.barLevel
+            || panel.collectionBehavior != BarWindows.overlayBehavior
+            || !panel.isVisible
+        else { return }
         bringForward()
     }
 

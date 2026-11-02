@@ -11,4 +11,9 @@ enum Log {
     static func error(_ message: String) {
         logger.error("\(message, privacy: .public)")
     }
+
+    /// The message is public. The path is not, so home-directory locations stay out of the unified log.
+    static func error(_ message: String, path: String) {
+        logger.error("\(message, privacy: .public) \(path, privacy: .private)")
+    }
 }

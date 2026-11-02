@@ -4,19 +4,81 @@ import Foundation
 /// Names the browser profile that owns a window, so a preview can tell work from personal.
 /// Chromium browsers share `--profile-directory` and a Local State file. Firefox uses profiles.ini.
 enum BrowserProfile {
+    private final class Store: @unchecked Sendable {
+        let lock = NSLock()
+        var arguments: [pid_t: [String]] = [:]
+        var files: [String: FileEntry] = [:]
+        var chromium: [String: ChromiumEntry] = [:]
+        var firefox: [String: FirefoxEntry] = [:]
+    }
+
+    private struct FileEntry {
+        var modified: Date?
+        var size: Int
+        var data: Data?
+    }
+
+    private struct ChromiumEntry {
+        var data: Data
+        var names: [String: String]
+        var tokens: [String: String]
+    }
+
+    private struct FirefoxEntry {
+        var data: Data
+        var text: String
+    }
+
+    private static let store = Store()
+
     @MainActor
     static func stamp(_ windows: [WindowInfo], apps: [pid_t: LiveApp]) -> [WindowInfo] {
-        windows.map { window in
+        var argumentsForPID: [pid_t: [String]] = [:]
+        func arguments(for pid: pid_t) -> [String] {
+            if let cached = argumentsForPID[pid] { return cached }
+            let loaded = cachedArguments(pid)
+            argumentsForPID[pid] = loaded
+            return loaded
+        }
+        let stamped = windows.map { window -> WindowInfo in
             var copy = window
             let app = apps[window.ownerPID]
+            guard let bundleID = app?.bundleID, let root = supportRoot(bundleID: bundleID) else { return copy }
             copy.profileName = name(
-                bundleID: app?.bundleID,
-                pid: window.ownerPID,
-                title: window.title,
+                bundleID: bundleID,
+                arguments: arguments(for: window.ownerPID),
+                supportRoot: root,
+                windowTitle: window.title,
                 appName: app?.name
             )
             return copy
         }
+        let seen = Set(windows.map(\.ownerPID))
+        store.lock.lock()
+        store.arguments = store.arguments.filter { seen.contains($0.key) }
+        store.lock.unlock()
+        return stamped
+    }
+
+    private static func supportRoot(bundleID: String) -> URL? {
+        guard let folder = supportFolder(bundleID: bundleID) else { return nil }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+            .appendingPathComponent(folder, isDirectory: true)
+    }
+
+    private static func cachedArguments(_ pid: pid_t) -> [String] {
+        store.lock.lock()
+        if let cached = store.arguments[pid] {
+            store.lock.unlock()
+            return cached
+        }
+        store.lock.unlock()
+        let arguments = ProcessArguments.arguments(of: pid) ?? []
+        store.lock.lock()
+        store.arguments[pid] = arguments
+        store.lock.unlock()
+        return arguments
     }
 
     /// Chrome often hosts every profile in one process, so the process arguments are not enough.
@@ -26,7 +88,7 @@ enum BrowserProfile {
         guard let bundleID, let folder = supportFolder(bundleID: bundleID) else { return nil }
         let root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
-        let arguments = ProcessArguments.arguments(of: pid) ?? []
+        let arguments = cachedArguments(pid)
         return name(
             bundleID: bundleID,
             arguments: arguments,
@@ -47,19 +109,18 @@ enum BrowserProfile {
         guard let bundleID else { return nil }
         if isFirefox(bundleID) {
             let ini = supportRoot.appendingPathComponent("profiles.ini")
-            guard let text = try? String(contentsOf: ini, encoding: .utf8) else { return nil }
+            guard let text = cachedFirefoxIni(at: ini) else { return nil }
             return firefoxName(arguments: arguments, profilesIni: text)
         }
         guard supportFolder(bundleID: bundleID) != nil else { return nil }
-        guard let state = localStateData(in: supportRoot) else { return nil }
-        let names = profileNames(in: state)
-        guard names.count > 1 else { return nil }
+        guard let profiles = cachedChromiumProfiles(in: supportRoot) else { return nil }
+        guard profiles.names.count > 1 else { return nil }
         if let directory = profileDirectory(from: arguments) {
-            return names[directory]
+            return profiles.names[directory]
         }
         return profileLabel(
             in: windowTitle,
-            tokens: titleTokens(in: state),
+            tokens: profiles.tokens,
             products: products(bundleID: bundleID, appName: appName)
         )
     }
@@ -124,9 +185,9 @@ enum BrowserProfile {
     static func displayName(name: String?, userName: String?, gaiaName: String?) -> String? {
         let generic: Set<String> = ["Person 1", "Your Chrome", "Your Chromium"]
         if let name, !name.isEmpty, !generic.contains(name) { return name }
-        if let gaiaName, !gaiaName.isEmpty { return gaiaName }
-        if let userName, !userName.isEmpty { return userName }
+        if let gaiaName, !gaiaName.isEmpty, !gaiaName.contains("@") { return gaiaName }
         if let name, !name.isEmpty { return name }
+        if let userName, !userName.isEmpty, !userName.contains("@") { return userName }
         return nil
     }
 
@@ -286,15 +347,80 @@ enum BrowserProfile {
             directory.appendingPathComponent("User Data/Local State"),
         ]
         for url in candidates {
-            if let data = try? Data(contentsOf: url), !data.isEmpty { return data }
+            if let data = cachedData(at: url), !data.isEmpty { return data }
         }
         return nil
     }
 
+    private static func cachedChromiumProfiles(in directory: URL) -> (names: [String: String], tokens: [String: String])? {
+        guard let data = localStateData(in: directory) else { return nil }
+        let key = directory.path
+        store.lock.lock()
+        if let cached = store.chromium[key], cached.data == data {
+            let names = cached.names
+            let tokens = cached.tokens
+            store.lock.unlock()
+            return (names, tokens)
+        }
+        store.lock.unlock()
+        let names = profileNames(in: data)
+        let tokens = titleTokens(in: data)
+        store.lock.lock()
+        store.chromium[key] = ChromiumEntry(data: data, names: names, tokens: tokens)
+        store.lock.unlock()
+        return (names, tokens)
+    }
+
+    private static func cachedFirefoxIni(at url: URL) -> String? {
+        guard let data = cachedData(at: url), !data.isEmpty else { return nil }
+        let key = url.path
+        store.lock.lock()
+        if let cached = store.firefox[key], cached.data == data {
+            let text = cached.text
+            store.lock.unlock()
+            return text
+        }
+        store.lock.unlock()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        store.lock.lock()
+        store.firefox[key] = FirefoxEntry(data: data, text: text)
+        store.lock.unlock()
+        return text
+    }
+
+    private static func cachedData(at url: URL) -> Data? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate
+        let size = values?.fileSize ?? -1
+        let key = url.path
+        store.lock.lock()
+        if let entry = store.files[key], entry.modified == modified, entry.size == size {
+            let data = entry.data
+            store.lock.unlock()
+            return data
+        }
+        store.lock.unlock()
+        let data = try? Data(contentsOf: url)
+        store.lock.lock()
+        store.files[key] = FileEntry(modified: modified, size: size, data: data)
+        store.lock.unlock()
+        return data
+    }
+
+    private static let firefoxAttachedFlags: Set<String> = ["-ProfileManager"]
+
     private static func firefoxSelectedProfile(_ arguments: [String]) -> String? {
         for (index, argument) in arguments.enumerated() {
-            if argument == "-P", index + 1 < arguments.count { return arguments[index + 1] }
-            if argument.hasPrefix("-P"), !argument.hasPrefix("-profile"), argument.count > 2 {
+            if argument == "-P" {
+                guard index + 1 < arguments.count else { return nil }
+                let name = arguments[index + 1]
+                guard !name.hasPrefix("-") else { return nil }
+                return name
+            }
+            if argument.hasPrefix("-P"),
+               !argument.hasPrefix("-profile"),
+               argument.count > 2,
+               !firefoxAttachedFlags.contains(argument) {
                 return String(argument.dropFirst(2))
             }
         }

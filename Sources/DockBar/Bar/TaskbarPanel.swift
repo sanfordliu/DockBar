@@ -133,15 +133,21 @@ private enum SkyLight {
 
 @MainActor
 enum BarHitShape {
-    /// Nearly clear pixels are not a hit target. A full opaque shape makes the
-    /// whole bar receive clicks.
+    private static var appliedSize: [Int: CGSize] = [:]
+
+    /// The top resize strip stays out of the opaque region so the window behind the bar can be resized.
     static func apply(to window: NSWindow) {
         guard window.windowNumber > 0 else { return }
-        var rect = CGRect(origin: .zero, size: window.frame.size)
+        let size = window.frame.size
+        if appliedSize[window.windowNumber] == size { return }
+        var rect = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - BarCursor.resizeLine))
         var region: CFTypeRef?
         let made = CGSNewRegionWithRect(&rect, &region)
         guard made == 0, let region else { return }
-        _ = SkyLight.setOpaqueShape(window: Int32(window.windowNumber), region: region)
+        // CGSNewRegionWithRect returns a +1 region. Consume that retain so ARC releases it.
+        let owned = Unmanaged<CFTypeRef>.passUnretained(region).takeRetainedValue()
+        _ = SkyLight.setOpaqueShape(window: Int32(window.windowNumber), region: owned)
+        appliedSize[window.windowNumber] = size
     }
 }
 
@@ -159,7 +165,7 @@ final class BarContentView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
+        guard bounds.contains(point), !BarCursor.resizeLineRect(in: self).contains(point) else { return nil }
         if let trash = TrashDrag.trashView(in: self, at: point) { return trash }
         return super.hitTest(point) ?? self
     }
@@ -220,7 +226,7 @@ final class ClearHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
+        guard bounds.contains(point), !BarCursor.resizeLineRect(in: self).contains(point) else { return nil }
         if let trash = TrashDrag.trashView(in: self, at: point) { return trash }
         return super.hitTest(point) ?? self
     }

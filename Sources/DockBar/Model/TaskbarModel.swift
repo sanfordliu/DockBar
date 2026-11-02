@@ -30,6 +30,8 @@ final class TaskbarModel {
     /// Where an app dragged in from Finder will be inserted, among pinned icons.
     var dropDisplay: CGDirectDisplayID?
     var dropVisualIndex: Int?
+    /// Set when a click asks to move a window that already exists. Tests read this.
+    private(set) var relocatedWindowID: CGWindowID?
 
     private let defaults: UserDefaults
 
@@ -64,9 +66,7 @@ final class TaskbarModel {
         windows = BrowserProfile.stamp(AXWindowService.shared.merge(records: records, apps: liveApps), apps: liveApps)
         focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let focusedPID, Permissions.isAccessibilityTrusted {
-            if let identifier = AXWindowService.shared.focusedWindowID(pid: focusedPID) {
-                focusedWindowID = identifier
-            }
+            focusedWindowID = AXWindowService.shared.focusedWindowID(pid: focusedPID)
         } else {
             focusedWindowID = nil
         }
@@ -99,8 +99,11 @@ final class TaskbarModel {
             )
             let gap = barTrailingGap(for: screen.displayID)
             let width = min(screen.frame.width - 24, base + gap)
+            let originX = screen.frame.midX - width / 2
+            let minX = screen.frame.minX
+            let maxX = max(minX, screen.frame.maxX - width)
             return CGRect(
-                x: screen.frame.midX - base / 2,
+                x: min(max(originX, minX), maxX),
                 y: screen.frame.minY + settings.bottomGap,
                 width: width,
                 height: height
@@ -118,52 +121,22 @@ final class TaskbarModel {
         let minSlot = finderLocked(in: row) ? 1 : 0
         if origin < minSlot { return 0 }
         let maxIndex = row.lastIndex(where: \.isPinned) ?? origin
-        let dx = min(max(dragDX, CGFloat(minSlot - origin) * stride), CGFloat(maxIndex - origin) * stride)
-        return placedX(index, origin: origin, dx: dx, row: row) - layoutX(index, in: row)
+        let minDX = CGFloat(minSlot - origin) * stride
+        if item.id == dragID { return max(dragDX, minDX) }
+        guard item.isPinned else { return 0 }
+        if trashDragHover { return index > origin ? -stride : 0 }
+        let dx = min(max(dragDX, minDX), CGFloat(maxIndex - origin) * stride)
+        let steps = Int((dx / stride).rounded())
+        let destination = min(max(origin + steps, minSlot), maxIndex)
+        if destination > origin, index > origin, index <= destination { return -stride }
+        if destination < origin, index < origin, index >= destination { return stride }
+        return 0
     }
 
-    /// Visual left edge of every icon while one is dragged. Icons stay in order and
-    /// never enter the dragged icon's slot.
-    private func placedX(_ index: Int, origin: Int, dx: CGFloat, row: [AppItem]) -> CGFloat {
-        let stride = settings.iconStride
-        let dragLeft = layoutX(origin, in: row) + dx
-        if index == origin { return dragLeft }
-        let dragRight = dragLeft + stride
-        var cursor: CGFloat = 0
-        var parked: [Int] = []
-        for slot in 0..<origin {
-            if cursor + stride > dragLeft + 0.5 {
-                parked.append(slot)
-                continue
-            }
-            if slot == index { return cursor }
-            cursor += stride
-            if showsFinderDivider(after: row[slot]) { cursor += BarLayout.dividerWidth }
-        }
-        var after = dragRight
-        for slot in parked + Array((origin + 1)..<row.count) {
-            if slot == index { return after }
-            after += stride
-            if showsFinderDivider(after: row[slot]) { after += BarLayout.dividerWidth }
-        }
-        return layoutX(index, in: row)
-    }
-
-    /// How far the floating bar must extend so a drop gap or a dragged icon is not clipped.
+    /// Extra width so an external drop can open a gap. Reordering stays inside the bar.
     func barTrailingGap(for displayID: CGDirectDisplayID) -> CGFloat {
-        let drop: CGFloat = (dragID == nil && dropDisplay == displayID && dropVisualIndex != nil) ? settings.iconStride : 0
-        guard dragID != nil, dragDisplay == displayID else { return drop }
-        let extra = entries(for: displayID).map { dragOffset(for: $0, displayID: displayID) }.max() ?? 0
-        return drop + max(0, extra)
-    }
-
-    private func layoutX(_ index: Int, in row: [AppItem]) -> CGFloat {
-        var x: CGFloat = 0
-        for item in row.prefix(index) {
-            x += settings.iconStride
-            if showsFinderDivider(after: item) { x += BarLayout.dividerWidth }
-        }
-        return x
+        guard dragID == nil, dropDisplay == displayID, dropVisualIndex != nil else { return 0 }
+        return settings.iconStride
     }
 
     func setHoveredApp(_ id: String) {
@@ -190,7 +163,6 @@ final class TaskbarModel {
         dragDX = dx
         let over = mouseIsOverTrash(mouse)
         if over != trashDragHover { trashDragHover = over }
-        onChange?()
     }
 
     var trashDragHover = false
@@ -373,7 +345,9 @@ final class TaskbarModel {
         var x = start
         let stride = settings.iconStride
         let earliest = finderLocked(in: row) ? 1 : 0
+        let gapIndex = dropDisplay == screen.displayID ? dropVisualIndex : nil
         for (index, item) in pinned.enumerated() {
+            if gapIndex == index { x += stride }
             if point.x < x + stride / 2 { return max(index, earliest) }
             x += stride
             if showsFinderDivider(after: item) { x += BarLayout.dividerWidth }
@@ -514,7 +488,7 @@ final class TaskbarModel {
         configuration.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
             if let error {
-                Log.error("Could not open \(url.path): \(error.localizedDescription)")
+                Log.error("Could not open application: \(error.localizedDescription)", path: url.path)
             }
             let pid = app?.processIdentifier
             Task { @MainActor in
@@ -687,7 +661,22 @@ final class TaskbarModel {
         let previous = Set(windows.filter { $0.ownerPID == pid }.map(\.windowID))
         NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser)
         if let pid {
-            steerApp(pid: pid, onto: displayID, previous: previous, moveExisting: true)
+            steerApp(pid: pid, onto: displayID, previous: previous, moveExisting: false)
+            return
+        }
+        steerTask?.cancel()
+        guard settings.openWindowsOnClickedDisplay else { return }
+        steerTask = Task { @MainActor in
+            let pauses: [Duration] = [.milliseconds(200), .milliseconds(300), .milliseconds(500), .milliseconds(800)]
+            for pause in pauses {
+                try? await Task.sleep(for: pause)
+                guard !Task.isCancelled, self.settings.openWindowsOnClickedDisplay else { return }
+                guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: Self.finderBundleID).first?.processIdentifier else {
+                    continue
+                }
+                self.steerApp(pid: pid, onto: displayID, previous: [], moveExisting: false)
+                return
+            }
         }
     }
 
@@ -713,6 +702,7 @@ final class TaskbarModel {
 
     /// Returns true once a window is on the target screen and focused.
     func placeWindow(pid: pid_t, on displayID: CGDirectDisplayID, previous: Set<CGWindowID>, moveExisting: Bool) -> Bool {
+        relocatedWindowID = nil
         let mine = windows.filter { window in
             window.ownerPID == pid && isListedWindow(window) && (window.frame.height == 0 || window.frame.height >= 80)
         }
@@ -737,6 +727,7 @@ final class TaskbarModel {
     }
 
     private func relocate(_ window: WindowInfo, to displayID: CGDirectDisplayID) {
+        relocatedWindowID = window.windowID
         guard let target = ScreenCoordinates.screen(for: displayID) else { return }
         guard window.frame.width >= 80, window.frame.height >= 80 else {
             AXWindowService.shared.focus(windowID: window.windowID, pid: window.ownerPID)

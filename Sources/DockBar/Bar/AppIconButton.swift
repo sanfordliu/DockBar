@@ -11,7 +11,7 @@ struct AppIconButton: View {
         let pad: CGFloat = 5
         let offset = model.dragOffset(for: item, displayID: displayID) + model.dropGapOffset(for: item, displayID: displayID)
         let draggingThis = model.dragID == item.id
-        let showWell = draggingThis || (model.dragID == nil && model.hoveredAppID == item.id)
+        let showWell = model.dragID == nil && model.hoveredAppID == item.id
         Image(nsImage: IconCache.shared.icon(for: item.path))
             .resizable()
             .interpolation(.high)
@@ -34,7 +34,7 @@ struct AppIconButton: View {
             .scaleEffect(showWell && !draggingThis ? 1.08 : 1)
         .animation(draggingThis ? nil : .spring(duration: 0.22), value: showWell)
         .offset(x: offset)
-        .animation(nil, value: offset)
+        .animation(draggingThis || model.dragID == nil ? nil : .spring(duration: 0.22), value: offset)
         .zIndex(model.dragID == item.id ? 2 : 0)
         .overlay {
             ClickCatcher(
@@ -104,6 +104,11 @@ final class ClickView: NSView {
     private var downX: CGFloat = 0
     private var dragging = false
     private var moved = false
+    private var handledMouseDown = false
+    /// Tests replace this so a click can finish without a physical mouse button.
+    var leftButtonIsDown: () -> Bool = { NSEvent.pressedMouseButtons & 1 != 0 }
+    /// Tests supply tracking events. Production reads them from the window.
+    var trackingEvent: ((NSWindow) -> NSEvent?)?
 
     override var isOpaque: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -143,6 +148,7 @@ final class ClickView: NSView {
         downX = event.locationInWindow.x
         dragging = false
         moved = false
+        handledMouseDown = false
         if event.modifierFlags.contains(.option) {
             onMiddle()
             moved = true
@@ -150,28 +156,37 @@ final class ClickView: NSView {
         }
         // A background app does not receive mouseDragged. While the button is held, pull the
         // events directly so the icon can follow the pointer.
-        guard let window = event.window, NSEvent.pressedMouseButtons & 1 != 0 else { return }
+        guard let window = event.window, leftButtonIsDown() else { return }
+        handledMouseDown = true
         let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp]
         while true {
-            let next = window.nextEvent(
-                matching: mask,
-                until: Date().addingTimeInterval(1.0 / 60.0),
-                inMode: .default,
-                dequeue: true
-            )
+            let next: NSEvent?
+            if let trackingEvent {
+                next = trackingEvent(window)
+            } else {
+                next = window.nextEvent(
+                    matching: mask,
+                    until: Date().addingTimeInterval(1.0 / 60.0),
+                    inMode: .eventTracking,
+                    dequeue: true
+                )
+            }
             if let next {
                 if next.type == .leftMouseUp { break }
                 follow(next)
-            } else if NSEvent.pressedMouseButtons & 1 == 0 {
+            } else if !leftButtonIsDown() {
+                if trackingEvent == nil {
+                    _ = window.nextEvent(
+                        matching: .leftMouseUp,
+                        until: Date(),
+                        inMode: .eventTracking,
+                        dequeue: true
+                    )
+                }
                 break
             }
         }
-        if dragging {
-            onDragEnd()
-        } else if !moved {
-            onLeft(screenFrame)
-        }
-        dragging = false
+        finishLeftGesture()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -179,6 +194,14 @@ final class ClickView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if handledMouseDown {
+            handledMouseDown = false
+            return
+        }
+        finishLeftGesture()
+    }
+
+    private func finishLeftGesture() {
         if dragging {
             onDragEnd()
         } else if !moved {

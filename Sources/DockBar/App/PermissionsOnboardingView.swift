@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct PermissionsOnboardingView: View {
+    @State private var promptedScreenCapture = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("DockBar replaces the Dock")
@@ -14,10 +16,23 @@ struct PermissionsOnboardingView: View {
                     SettingsWindowController.shared.yieldToSystemUI()
                     Permissions.promptAccessibility()
                 }
-                row("Screen Recording", "Required for the window previews.") {
+                row(
+                    "Screen Recording",
+                    "Required for the window previews.",
+                    buttonTitle: promptedScreenCapture ? "Open Settings" : "Allow"
+                ) {
                     SettingsWindowController.shared.yieldToSystemUI()
-                    if !Permissions.requestScreenCapture() {
+                    switch Permissions.screenCaptureStep(
+                        alreadyPrompted: promptedScreenCapture,
+                        granted: Permissions.isScreenCaptureGranted
+                    ) {
+                    case .requestAccess:
+                        promptedScreenCapture = true
+                        _ = Permissions.requestScreenCapture()
+                    case .openSettings:
                         Permissions.openPrivacyPane("Privacy_ScreenCapture")
+                    case nil:
+                        break
                     }
                 }
                 row("Finder", "Required to empty the Trash. The icon still shows a local count without it.") {
@@ -42,7 +57,7 @@ struct PermissionsOnboardingView: View {
         .frame(width: 520)
     }
 
-    private func row(_ title: String, _ detail: String, action: @escaping () -> Void) -> some View {
+    private func row(_ title: String, _ detail: String, buttonTitle: String = "Allow", action: @escaping () -> Void) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
@@ -52,7 +67,7 @@ struct PermissionsOnboardingView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
-            Button("Allow", action: action)
+            Button(buttonTitle, action: action)
         }
     }
 }
