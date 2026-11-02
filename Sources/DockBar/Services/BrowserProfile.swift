@@ -130,10 +130,10 @@ enum BrowserProfile {
 
     /// Profile label plus the color Chromium stored for that profile.
     ///
-    /// Chrome writes the chosen color into `Local State` under `profile.info_cache.<directory>`
-    /// as SkColor integers (`0xAARRGGBB`, often negative in JSON). `profile_highlight_color` is the
-    /// color Chrome paints, with `default_avatar_fill_color` and `profile_color_seed` as fallbacks.
-    /// The same file shape is shared by Edge, Brave, Vivaldi, Opera, Arc, and Chromium.
+    /// Chrome writes profile colors into `Local State` under `profile.info_cache.<directory>`
+    /// as SkColor integers (`0xAARRGGBB`, often negative in JSON). `default_avatar_stroke_color`
+    /// is the saturated color Chrome shows for the profile. `profile_highlight_color` is only the
+    /// pale wash behind it. The same file shape is shared by Edge, Brave, Vivaldi, Opera, Arc, and Chromium.
     static func mark(
         bundleID: String?,
         arguments: [String],
@@ -220,7 +220,7 @@ enum BrowserProfile {
         return names
     }
 
-    /// Profile directory to the color Chrome stored for it. Highlight wins, then avatar fill, then the seed.
+    /// Profile directory to the saturated color Chrome shows. Stroke wins, then the chosen seed, then the pale highlight.
     static func profileColors(in localState: Data) -> [String: ProfileTint] {
         guard let cache = infoCache(in: localState) else { return [:] }
         var colors: [String: ProfileTint] = [:]
@@ -245,7 +245,7 @@ enum BrowserProfile {
     }
 
     private static func profileTint(in info: [String: Any]) -> ProfileTint? {
-        for key in ["profile_highlight_color", "default_avatar_fill_color", "profile_color_seed"] {
+        for key in ["default_avatar_stroke_color", "profile_color_seed", "profile_highlight_color"] {
             if let tint = profileTint(skColor: info[key]) { return tint }
         }
         return nil

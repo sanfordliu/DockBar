@@ -66,20 +66,22 @@ struct AppIconButton: View {
     }
 
     private func icon(size: CGFloat) -> some View {
+        let image = IconCache.shared.icon(for: item.path)
         let tint = item.profileTint.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
-        return Image(nsImage: IconCache.shared.icon(for: item.path))
+        return Image(nsImage: image)
             .resizable()
             .interpolation(.high)
             .frame(width: size, height: size)
             .overlay {
                 if let tint {
-                    tint.blendMode(.color)
-                }
-            }
-            .overlay {
-                if let tint {
-                    RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                        .strokeBorder(tint, lineWidth: 1.5)
+                    tint
+                        .mask(
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: size, height: size)
+                        )
+                        .blendMode(.color)
                 }
             }
             .compositingGroup()

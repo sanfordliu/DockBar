@@ -887,20 +887,22 @@ struct DockBarTests {
 
         let blueBits = Int(Int32(bitPattern: UInt32(0xFF42_85F4)))
         let redBits = Int(Int32(bitPattern: UInt32(0xFFFF_0000)))
+        let greenBits = Int(Int32(bitPattern: UInt32(0xFF34_A853)))
         let blue = ProfileTint(red: 66.0 / 255, green: 133.0 / 255, blue: 244.0 / 255)
         let red = ProfileTint(red: 1, green: 0, blue: 0)
+        let green = ProfileTint(red: 52.0 / 255, green: 168.0 / 255, blue: 83.0 / 255)
         #expect(BrowserProfile.profileTint(skColor: blueBits) == blue)
         #expect(BrowserProfile.profileTint(skColor: redBits) == red)
         #expect(BrowserProfile.profileTint(skColor: 0x0042_85F4) == nil)
         let state = Data("""
         {"profile":{"info_cache":{
           "Default":{"name":"Personal","user_name":"me@example.com","profile_highlight_color":\(redBits)},
-          "Profile 1":{"name":"Person 1","user_name":"work@example.com","gaia_name":"Work","profile_highlight_color":\(blueBits),"profile_color_seed":\(redBits)}
+          "Profile 1":{"name":"Person 1","user_name":"work@example.com","gaia_name":"Work","default_avatar_stroke_color":\(greenBits),"profile_highlight_color":\(blueBits),"profile_color_seed":\(redBits)}
         }}}
         """.utf8)
         let colors = BrowserProfile.profileColors(in: state)
         #expect(colors["Default"] == red)
-        #expect(colors["Profile 1"] == blue)
+        #expect(colors["Profile 1"] == green)
         let seedOnly = Data("""
         {"profile":{"info_cache":{"Default":{"name":"Personal","profile_color_seed":\(redBits)}}}}
         """.utf8)
@@ -922,7 +924,7 @@ struct DockBarTests {
             supportRoot: root
         )
         #expect(work.name == "Work")
-        #expect(work.tint == blue)
+        #expect(work.tint == green)
         let tokens = BrowserProfile.titleTokens(in: state)
         #expect(BrowserProfile.profileLabel(
             in: "Inbox - Google Chrome - Ada (Work)",
