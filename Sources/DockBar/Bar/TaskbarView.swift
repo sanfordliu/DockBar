@@ -28,16 +28,20 @@ struct TaskbarView: View {
 
     /// A capsule that hugs the icons, with the same inset on both ends.
     private func floatingBar(_ items: [AppItem]) -> some View {
-        HStack(spacing: 0) {
+        let gap = model.barTrailingGap(for: displayID)
+        return HStack(spacing: 0) {
             Spacer(minLength: 0)
             iconCluster(items)
             if model.settings.showTrash {
                 BarDivider(height: model.settings.effectiveIconSize * 0.7)
+                    .offset(x: gap)
                 TrashButton()
+                    .offset(x: gap)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, BarLayout.edgeInset)
+        .padding(.trailing, gap)
     }
 
     private func fullWidthBar(_ items: [AppItem]) -> some View {
@@ -75,7 +79,46 @@ struct TaskbarView: View {
                 }
             }
         }
+        .overlay(alignment: .leading) {
+            if let slotX = dropSlotX(items) {
+                DropSlot(width: model.settings.iconStride)
+                    .offset(x: slotX)
+            }
+        }
+        .animation(model.dragID == nil ? .spring(duration: 0.22) : nil, value: model.dropVisualIndex)
         .animation(model.dragID == nil ? .spring(duration: 0.28) : nil, value: items.map(\.id))
+    }
+
+    private func dropSlotX(_ items: [AppItem]) -> CGFloat? {
+        guard model.dragID == nil, model.dropDisplay == displayID, let visual = model.dropVisualIndex else { return nil }
+        let pinned = items.filter(\.isPinned)
+        var x: CGFloat = 0
+        for item in pinned.prefix(min(visual, pinned.count)) {
+            x += model.settings.iconStride
+            if item.isPinned && model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID {
+                x += BarLayout.dividerWidth
+            }
+        }
+        return x
+    }
+}
+
+private struct DropSlot: View {
+    var width: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.primary.opacity(0.18))
+            .overlay {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.7))
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 8)
+            .frame(width: width)
+            .frame(maxHeight: .infinity)
+            .allowsHitTesting(false)
     }
 }
 

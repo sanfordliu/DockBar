@@ -5,22 +5,24 @@ struct AppIconButton: View {
     var item: AppItem
     var displayID: CGDirectDisplayID
     var model: TaskbarModel
-    @State private var hovered = false
 
     var body: some View {
         let size = model.settings.effectiveIconSize
         let pad: CGFloat = 5
-        let offset = model.dragOffset(for: item, displayID: displayID)
+        let offset = model.dragOffset(for: item, displayID: displayID) + model.dropGapOffset(for: item, displayID: displayID)
+        let draggingThis = model.dragID == item.id
+        let showWell = draggingThis || (model.dragID == nil && model.hoveredAppID == item.id)
         Image(nsImage: IconCache.shared.icon(for: item.path))
             .resizable()
             .interpolation(.high)
             .frame(width: size, height: size)
             .opacity(item.isRunning ? 1 : 0.55)
             .padding(pad)
-            .background(
+            .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(hovered ? 0.14 : 0))
-            )
+                    .fill(Color.primary.opacity(showWell ? 0.16 : 0))
+                    .padding(.horizontal, 3)
+            }
             .overlay(alignment: .bottom) {
                 Capsule()
                     .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
@@ -29,10 +31,10 @@ struct AppIconButton: View {
                     .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
             }
             .frame(width: model.settings.iconStride, height: model.settings.barHeight - 6)
-            .scaleEffect(hovered && model.dragID == nil ? 1.08 : 1)
-        .animation(.spring(duration: 0.22), value: hovered)
+            .scaleEffect(showWell && !draggingThis ? 1.08 : 1)
+        .animation(draggingThis ? nil : .spring(duration: 0.22), value: showWell)
         .offset(x: offset)
-        .animation(model.dragID == item.id ? .none : .spring(duration: 0.2), value: offset)
+        .animation(nil, value: offset)
         .zIndex(model.dragID == item.id ? 2 : 0)
         .overlay {
             ClickCatcher(
@@ -45,10 +47,11 @@ struct AppIconButton: View {
                     AppMenu.popUp(for: item, displayID: displayID, in: view)
                 },
                 onHover: { inside, rect in
-                    hovered = inside
                     if inside {
+                        model.setHoveredApp(item.id)
                         PreviewCoordinator.shared.iconEntered(appID: item.id, anchor: rect, displayID: displayID)
                     } else {
+                        model.clearHoveredApp(item.id)
                         PreviewCoordinator.shared.iconExited()
                     }
                 },
@@ -143,18 +146,36 @@ final class ClickView: NSView {
         if event.modifierFlags.contains(.option) {
             onMiddle()
             moved = true
+            return
         }
+        // A background app does not receive mouseDragged. While the button is held, pull the
+        // events directly so the icon can follow the pointer.
+        guard let window = event.window, NSEvent.pressedMouseButtons & 1 != 0 else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp]
+        while true {
+            let next = window.nextEvent(
+                matching: mask,
+                until: Date().addingTimeInterval(1.0 / 60.0),
+                inMode: .default,
+                dequeue: true
+            )
+            if let next {
+                if next.type == .leftMouseUp { break }
+                follow(next)
+            } else if NSEvent.pressedMouseButtons & 1 == 0 {
+                break
+            }
+        }
+        if dragging {
+            onDragEnd()
+        } else if !moved {
+            onLeft(screenFrame)
+        }
+        dragging = false
     }
 
     override func mouseDragged(with event: NSEvent) {
-        let dx = event.locationInWindow.x - downX
-        guard dragEnabled, abs(dx) > 4 else { return }
-        if !dragging {
-            dragging = true
-            onDragBegan()
-        }
-        moved = true
-        onDrag(dx)
+        follow(event)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -164,6 +185,17 @@ final class ClickView: NSView {
             onLeft(screenFrame)
         }
         dragging = false
+    }
+
+    private func follow(_ event: NSEvent) {
+        let dx = event.locationInWindow.x - downX
+        guard dragEnabled, abs(dx) > 4 else { return }
+        if !dragging {
+            dragging = true
+            onDragBegan()
+        }
+        moved = true
+        onDrag(dx)
     }
 
     override func rightMouseDown(with event: NSEvent) {

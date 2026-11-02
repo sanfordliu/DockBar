@@ -6,6 +6,8 @@ struct TrashButton: View {
     @State private var hovered = false
     @State private var targeted = false
 
+    private var acceptingDrop: Bool { targeted || model.trashDragHover }
+
     var body: some View {
         let size = model.settings.effectiveIconSize
         Image(nsImage: IconCache.shared.trashIcon(isFull: model.trashCount > 0))
@@ -13,12 +15,13 @@ struct TrashButton: View {
             .interpolation(.high)
             .frame(width: size, height: size)
             .padding(BarLayout.trashInset)
-            .background(
+            .background {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(hovered || targeted || model.trashDragHover ? 0.16 : 0))
-            )
-            .scaleEffect(targeted || model.trashDragHover ? 1.08 : 1)
-            .animation(.spring(duration: 0.2), value: targeted)
+                    .fill(Color.primary.opacity(acceptingDrop ? 0.34 : (hovered ? 0.16 : 0)))
+                    .padding(.horizontal, 2)
+            }
+            .scaleEffect(acceptingDrop ? 1.22 : 1)
+            .animation(.spring(duration: 0.2), value: acceptingDrop)
             .overlay {
                 TrashCatcher(
                     onHover: { hovered = $0 },
@@ -67,6 +70,29 @@ struct TrashCatcher: NSViewRepresentable {
 }
 
 @MainActor
+enum AppDrop {
+    static func applications(on pasteboard: NSPasteboard) -> [URL] {
+        var seen = Set<String>()
+        return TrashDrag.urls(from: pasteboard).compactMap { url in
+            guard let app = applicationURL(url) else { return nil }
+            guard seen.insert(app.path).inserted else { return nil }
+            return app
+        }
+    }
+
+    static func applicationURL(_ url: URL) -> URL? {
+        let resolvedAlias = (try? URL(resolvingAliasFileAt: url, options: [.withoutUI])) ?? url
+        let resolved = resolvedAlias.resolvingSymlinksInPath()
+        guard resolved.pathExtension.lowercased() == "app" else { return nil }
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &directory), directory.boolValue else {
+            return nil
+        }
+        return resolved
+    }
+}
+
+@MainActor
 enum TrashDrag {
     static let types: [NSPasteboard.PasteboardType] = [
         .fileURL,
@@ -99,17 +125,40 @@ enum TrashDrag {
         let point = view.convert(sender.draggingLocation, from: nil)
         let over = trashView(in: view, at: point) != nil
         highlight(in: view, on: over)
-        return over ? .delete : []
+        if over {
+            TaskbarModel.shared.clearDropTarget()
+            return .delete
+        }
+        let apps = AppDrop.applications(on: sender.draggingPasteboard)
+        guard !apps.isEmpty else {
+            TaskbarModel.shared.clearDropTarget()
+            return []
+        }
+        if let screenPoint = screenPoint(of: sender, in: view) {
+            TaskbarModel.shared.trackDrop(at: screenPoint)
+        }
+        return .copy
     }
 
     static func perform(_ sender: NSDraggingInfo, in view: NSView) -> Bool {
         highlight(in: view, on: false)
+        defer { TaskbarModel.shared.clearDropTarget() }
         let point = view.convert(sender.draggingLocation, from: nil)
-        guard trashView(in: view, at: point) != nil else { return false }
-        let urls = urls(from: sender.draggingPasteboard)
-        guard !urls.isEmpty else { return false }
-        TrashService.shared.receive(urls: urls)
+        if trashView(in: view, at: point) != nil {
+            let urls = urls(from: sender.draggingPasteboard)
+            guard !urls.isEmpty else { return false }
+            TrashService.shared.receive(urls: urls)
+            return true
+        }
+        let apps = AppDrop.applications(on: sender.draggingPasteboard)
+        guard !apps.isEmpty else { return false }
+        TaskbarModel.shared.pinApplications(apps, at: screenPoint(of: sender, in: view))
         return true
+    }
+
+    static func screenPoint(of sender: NSDraggingInfo, in view: NSView) -> CGPoint? {
+        guard let window = view.window else { return nil }
+        return window.convertToScreen(NSRect(origin: sender.draggingLocation, size: .zero)).origin
     }
 
     static func highlight(in root: NSView, on: Bool) {

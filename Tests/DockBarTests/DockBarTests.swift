@@ -182,6 +182,8 @@ struct DockBarTests {
         #expect(fitted != nil)
         if let fitted {
             #expect(fitted.minY >= screen.frame.minY + 48 - 1)
+            #expect(abs(fitted.height - (maximized.height - 48)) < 2)
+            #expect(abs(fitted.maxY - maximized.maxY) < 2)
             #expect(ax.workAreaFrame(for: fitted, screen: screen, occupiedHeight: 48) == nil)
         }
         #expect(ax.workAreaFrame(for: CGRect(x: 10, y: 10, width: 40, height: 40), screen: screen, occupiedHeight: 48) == nil)
@@ -303,6 +305,13 @@ struct DockBarTests {
         let over = StubDrag(location: NSPoint(x: 190, y: 20), pasteboard: pasteboard)
         let miss = StubDrag(location: NSPoint(x: 8, y: 8), pasteboard: pasteboard)
         #expect(content.draggingEntered(miss) == [])
+        let appBoard = NSPasteboard(name: .init("dockbar-app-\(UUID().uuidString)"))
+        appBoard.declareTypes([.fileURL], owner: nil)
+        appBoard.writeObjects([URL(fileURLWithPath: textEditPath) as NSURL])
+        let appDrag = StubDrag(location: NSPoint(x: 8, y: 8), pasteboard: appBoard)
+        #expect(AppDrop.applications(on: appBoard).count == 1)
+        #expect(content.draggingEntered(appDrag) == .copy)
+        #expect(content.performDragOperation(appDrag))
         #expect(content.draggingUpdated(over) == .delete)
         #expect(trash.draggingEntered(over) == .delete)
         #expect(trash.draggingUpdated(over) == .delete)
@@ -367,10 +376,19 @@ struct DockBarTests {
 
         model.beginDrag(id: finder.id, displayID: screen.displayID)
         #expect(model.dragID == nil)
+        model.setHoveredApp(edit.id)
+        model.setHoveredApp(calc.id)
+        #expect(model.hoveredAppID == calc.id)
         model.beginDrag(id: edit.id, displayID: screen.displayID)
-        model.updateDrag(dx: model.settings.iconStride, mouse: away)
+        #expect(model.hoveredAppID == nil)
+        model.updateDrag(dx: model.settings.iconStride * 0.4, mouse: away)
         #expect(!model.trashDragHover)
+        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
+        model.updateDrag(dx: -model.settings.iconStride * 0.4, mouse: away)
+        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
+        model.updateDrag(dx: model.settings.iconStride, mouse: away)
         #expect(model.dragOffset(for: row.first { $0.id == edit.id }!, displayID: screen.displayID) != 0)
+        #expect(pinnedSlotsDisjoint(model, displayID: screen.displayID))
         model.endDrag(at: away)
         let reordered = model.entries(for: screen.displayID).filter(\.isPinned).map(\.id)
         #expect(reordered.last == edit.id)
@@ -381,6 +399,25 @@ struct DockBarTests {
         #expect(model.trashDragHover)
         model.endDrag(at: trash)
         #expect(!model.entries(for: screen.displayID).contains { $0.id == calc.id })
+        model.pinApplications([URL(fileURLWithPath: calcPath), URL(fileURLWithPath: "/tmp/notes.txt")])
+        #expect(model.entries(for: screen.displayID).contains { $0.bundleID == "com.apple.calculator" && $0.isPinned })
+        model.pinApplications([URL(fileURLWithPath: calcPath)])
+        #expect(model.entries(for: screen.displayID).filter { $0.bundleID == "com.apple.calculator" }.count == 1)
+
+        let bar = model.panelFrame(for: screen)
+        model.pinApplications(
+            [URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")],
+            at: CGPoint(x: bar.minX + BarLayout.edgeInset + 1, y: bar.midY)
+        )
+        let inserted = model.entries(for: screen.displayID).filter(\.isPinned).map(\.bundleID)
+        #expect(inserted.first == TaskbarModel.finderBundleID)
+        #expect(inserted.dropFirst().first == "com.apple.Terminal")
+        let widened = model.panelFrame(for: screen)
+        model.pinApplications(
+            [URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")],
+            at: CGPoint(x: widened.maxX - 2, y: widened.midY)
+        )
+        #expect(model.entries(for: screen.displayID).filter(\.isPinned).map(\.bundleID).last == "com.apple.ActivityMonitor")
 
         model.settings.showTrash = false
         model.beginDrag(id: edit.id, displayID: screen.displayID)
@@ -853,6 +890,27 @@ struct DockBarTests {
     private var calcPath: String { "/System/Applications/Calculator.app" }
 }
 
+@MainActor
+private func pinnedSlotsDisjoint(_ model: TaskbarModel, displayID: CGDirectDisplayID) -> Bool {
+    let stride = model.settings.iconStride
+    var x: CGFloat = 0
+    var slots: [CGRect] = []
+    for item in model.entries(for: displayID) {
+        let left = x + model.dragOffset(for: item, displayID: displayID)
+        slots.append(CGRect(x: left, y: 0, width: stride, height: 10))
+        x += stride
+        if model.settings.showFinder && item.bundleID == TaskbarModel.finderBundleID {
+            x += BarLayout.dividerWidth
+        }
+    }
+    for index in slots.indices {
+        for other in slots.indices where other > index {
+            if slots[index].insetBy(dx: 0.5, dy: 0.5).intersects(slots[other]) { return false }
+        }
+    }
+    return true
+}
+
 private func freshDefaults() -> UserDefaults {
     let name = "DockBarTests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: name)!
@@ -864,6 +922,7 @@ private func freshDefaults() -> UserDefaults {
 private enum DockDouble {
     static func arm() {
         DockController.execute = { _, _ in "" }
+        AXWindowService.systemChangesAllowed = false
     }
 }
 

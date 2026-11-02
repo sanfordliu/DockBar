@@ -25,6 +25,11 @@ final class TaskbarModel {
     var dragID: String?
     var dragDisplay: CGDirectDisplayID?
     private(set) var dragDX: CGFloat = 0
+    /// One icon at a time. Adjacent tracking areas otherwise both look hovered.
+    var hoveredAppID: String?
+    /// Where an app dragged in from Finder will be inserted, among pinned icons.
+    var dropDisplay: CGDirectDisplayID?
+    var dropVisualIndex: Int?
 
     private let defaults: UserDefaults
 
@@ -88,12 +93,14 @@ final class TaskbarModel {
         case .floating:
             let row = entries(for: screen.displayID)
             let showsFinderDivider = row.contains { $0.isPinned && settings.showFinder && $0.bundleID == Self.finderBundleID }
-            let width = min(
+            let base = min(
                 screen.frame.width - 24,
                 BarLayout.floatingWidth(itemCount: row.count, settings: settings, showsFinderDivider: showsFinderDivider)
             )
+            let gap = barTrailingGap(for: screen.displayID)
+            let width = min(screen.frame.width - 24, base + gap)
             return CGRect(
-                x: screen.frame.midX - width / 2,
+                x: screen.frame.midX - base / 2,
                 y: screen.frame.minY + settings.bottomGap,
                 width: width,
                 height: height
@@ -110,14 +117,63 @@ final class TaskbarModel {
         let stride = settings.iconStride
         let minSlot = finderLocked(in: row) ? 1 : 0
         if origin < minSlot { return 0 }
-        if item.id == dragID { return dragDX }
-        guard item.isPinned else { return 0 }
-        let pinnedLast = row.lastIndex(where: \.isPinned) ?? origin
-        let steps = Int((dragDX / stride).rounded())
-        let destination = min(max(origin + steps, minSlot), pinnedLast)
-        if steps > 0, index > origin, index <= destination { return -stride }
-        if steps < 0, index < origin, index >= destination { return stride }
-        return 0
+        let maxIndex = row.lastIndex(where: \.isPinned) ?? origin
+        let dx = min(max(dragDX, CGFloat(minSlot - origin) * stride), CGFloat(maxIndex - origin) * stride)
+        return placedX(index, origin: origin, dx: dx, row: row) - layoutX(index, in: row)
+    }
+
+    /// Visual left edge of every icon while one is dragged. Icons stay in order and
+    /// never enter the dragged icon's slot.
+    private func placedX(_ index: Int, origin: Int, dx: CGFloat, row: [AppItem]) -> CGFloat {
+        let stride = settings.iconStride
+        let dragLeft = layoutX(origin, in: row) + dx
+        if index == origin { return dragLeft }
+        let dragRight = dragLeft + stride
+        var cursor: CGFloat = 0
+        var parked: [Int] = []
+        for slot in 0..<origin {
+            if cursor + stride > dragLeft + 0.5 {
+                parked.append(slot)
+                continue
+            }
+            if slot == index { return cursor }
+            cursor += stride
+            if showsFinderDivider(after: row[slot]) { cursor += BarLayout.dividerWidth }
+        }
+        var after = dragRight
+        for slot in parked + Array((origin + 1)..<row.count) {
+            if slot == index { return after }
+            after += stride
+            if showsFinderDivider(after: row[slot]) { after += BarLayout.dividerWidth }
+        }
+        return layoutX(index, in: row)
+    }
+
+    /// How far the floating bar must extend so a drop gap or a dragged icon is not clipped.
+    func barTrailingGap(for displayID: CGDirectDisplayID) -> CGFloat {
+        let drop: CGFloat = (dragID == nil && dropDisplay == displayID && dropVisualIndex != nil) ? settings.iconStride : 0
+        guard dragID != nil, dragDisplay == displayID else { return drop }
+        let extra = entries(for: displayID).map { dragOffset(for: $0, displayID: displayID) }.max() ?? 0
+        return drop + max(0, extra)
+    }
+
+    private func layoutX(_ index: Int, in row: [AppItem]) -> CGFloat {
+        var x: CGFloat = 0
+        for item in row.prefix(index) {
+            x += settings.iconStride
+            if showsFinderDivider(after: item) { x += BarLayout.dividerWidth }
+        }
+        return x
+    }
+
+    func setHoveredApp(_ id: String) {
+        guard dragID == nil else { return }
+        hoveredAppID = id
+    }
+
+    func clearHoveredApp(_ id: String) {
+        guard hoveredAppID == id else { return }
+        hoveredAppID = nil
     }
 
     func beginDrag(id: String, displayID: CGDirectDisplayID) {
@@ -125,6 +181,8 @@ final class TaskbarModel {
         dragID = id
         dragDisplay = displayID
         dragDX = 0
+        hoveredAppID = nil
+        clearDropTarget()
         PreviewCoordinator.shared.hide()
     }
 
@@ -132,6 +190,7 @@ final class TaskbarModel {
         dragDX = dx
         let over = mouseIsOverTrash(mouse)
         if over != trashDragHover { trashDragHover = over }
+        onChange?()
     }
 
     var trashDragHover = false
@@ -280,6 +339,138 @@ final class TaskbarModel {
         pins.append(Pin(path: item.path, bundleID: item.bundleID, name: item.name))
         savePins()
         recompute()
+    }
+
+    /// Inserts dropped apps at the cursor. Without a point, they go on the end.
+    func pinApplications(_ urls: [URL], at screenPoint: CGPoint? = nil) {
+        var visual = screenPoint.flatMap { visualPinInsertIndex(at: $0) }
+        var changed = false
+        for url in urls {
+            guard let pin = Self.pin(forApplication: url) else { continue }
+            if pin.bundleID == Self.finderBundleID || isFinder(pin) {
+                if !settings.showFinder {
+                    settings.showFinder = true
+                    changed = true
+                }
+                continue
+            }
+            guard !pins.contains(where: { $0.id == pin.id }) else { continue }
+            insertPin(pin, atVisual: visual)
+            changed = true
+            if let step = visual { visual = step + 1 }
+        }
+        guard changed else { return }
+        savePins()
+        recompute()
+    }
+
+    /// Pinned-icon index under a screen point. Finder stays first.
+    func visualPinInsertIndex(at point: CGPoint) -> Int? {
+        guard let screen = NSScreen.screens.first(where: { panelFrame(for: $0).contains(point) }) else { return nil }
+        let row = entries(for: screen.displayID)
+        let pinned = row.filter(\.isPinned)
+        let start = iconClusterMinX(on: screen, row: row)
+        var x = start
+        let stride = settings.iconStride
+        let earliest = finderLocked(in: row) ? 1 : 0
+        for (index, item) in pinned.enumerated() {
+            if point.x < x + stride / 2 { return max(index, earliest) }
+            x += stride
+            if showsFinderDivider(after: item) { x += BarLayout.dividerWidth }
+        }
+        return max(pinned.count, earliest)
+    }
+
+    func trackDrop(at screenPoint: CGPoint) {
+        guard let screen = NSScreen.screens.first(where: { panelFrame(for: $0).contains(screenPoint) }),
+              let visual = visualPinInsertIndex(at: screenPoint) else {
+            clearDropTarget()
+            return
+        }
+        let display = screen.displayID
+        guard dropDisplay != display || dropVisualIndex != visual else { return }
+        dropDisplay = display
+        dropVisualIndex = visual
+        onChange?()
+    }
+
+    func clearDropTarget() {
+        guard dropDisplay != nil || dropVisualIndex != nil else { return }
+        dropDisplay = nil
+        dropVisualIndex = nil
+        onChange?()
+    }
+
+    /// Slides icons apart so a dropped app can land under the pointer.
+    func dropGapOffset(for item: AppItem, displayID: CGDirectDisplayID) -> CGFloat {
+        guard dragID == nil, dropDisplay == displayID, let visual = dropVisualIndex else { return 0 }
+        let row = entries(for: displayID)
+        guard let index = row.firstIndex(where: { $0.id == item.id }) else { return 0 }
+        let pinned = row.filter(\.isPinned)
+        let gapRowIndex: Int
+        if visual >= pinned.count {
+            gapRowIndex = row.firstIndex(where: { !$0.isPinned }) ?? row.count
+        } else {
+            gapRowIndex = row.firstIndex(where: { $0.id == pinned[visual].id }) ?? visual
+        }
+        return index >= gapRowIndex ? settings.iconStride : 0
+    }
+
+    private func insertPin(_ pin: Pin, atVisual visual: Int?) {
+        var ordered = pins.filter { !isFinder($0) }
+        if settings.showFinder, let finder = finderPin() {
+            ordered.insert(finder, at: 0)
+        }
+        let earliest = (settings.showFinder && ordered.first.map { isFinder($0) } == true) ? 1 : 0
+        let index = min(max(visual ?? ordered.count, earliest), ordered.count)
+        ordered.insert(pin, at: index)
+        if settings.showFinder {
+            ordered.removeAll { isFinder($0) }
+        }
+        pins = ordered
+    }
+
+    private func showsFinderDivider(after item: AppItem) -> Bool {
+        item.isPinned && settings.showFinder && item.bundleID == Self.finderBundleID
+    }
+
+    /// Left edge of the first icon, matching the bar's SwiftUI layout.
+    private func iconClusterMinX(on screen: NSScreen, row: [AppItem]) -> CGFloat {
+        let panel = panelFrame(for: screen)
+        let stride = settings.iconStride
+        var cluster: CGFloat = 0
+        for item in row {
+            cluster += stride
+            if showsFinderDivider(after: item) { cluster += BarLayout.dividerWidth }
+        }
+        if settings.style == .floating {
+            return panel.minX + BarLayout.edgeInset
+        }
+        let leadingPad: CGFloat = settings.alignment == .leading ? 8 : 0
+        let leftBalance: CGFloat = (settings.alignment == .center && settings.showTrash) ? settings.trashSlot : 0
+        let trashCluster: CGFloat = settings.showTrash
+            ? BarLayout.dividerWidth + settings.effectiveIconSize + BarLayout.trashInset * 2 + 10
+            : 10
+        let used = leadingPad + leftBalance + cluster + trashCluster
+        let extra = max(0, panel.width - used)
+        let leftSpacer: CGFloat = settings.alignment == .center ? extra / 2 : 0
+        return panel.minX + leadingPad + leftBalance + leftSpacer
+    }
+
+    static func pin(forApplication url: URL) -> Pin? {
+        let resolved = url.resolvingSymlinksInPath()
+        guard resolved.pathExtension.lowercased() == "app" else { return nil }
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &directory), directory.boolValue else {
+            return nil
+        }
+        let bundle = Bundle(url: resolved)
+        let bundleID = bundle?.bundleIdentifier
+        let name = bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String
+            ?? bundle?.infoDictionary?["CFBundleDisplayName"] as? String
+            ?? bundle?.infoDictionary?["CFBundleName"] as? String
+            ?? FileManager.default.displayName(atPath: resolved.path)
+        return Pin(path: resolved.path, bundleID: bundleID, name: name)
     }
 
     func unpin(_ item: AppItem) {
@@ -656,5 +847,6 @@ final class TaskbarModel {
         dragDisplay = nil
         dragDX = 0
         trashDragHover = false
+        hoveredAppID = nil
     }
 }

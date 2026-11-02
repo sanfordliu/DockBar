@@ -174,6 +174,7 @@ final class BarContentView: NSView {
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         TrashDrag.highlight(in: self, on: false)
+        TaskbarModel.shared.clearDropTarget()
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -234,6 +235,7 @@ final class ClearHostingView<Content: View>: NSHostingView<Content> {
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         TrashDrag.highlight(in: self, on: false)
+        TaskbarModel.shared.clearDropTarget()
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {

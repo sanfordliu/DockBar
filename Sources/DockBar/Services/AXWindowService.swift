@@ -32,6 +32,10 @@ private func axObserverCallback(
 final class AXWindowService {
     static let shared = AXWindowService()
 
+    /// Tests set this to false. Production leaves it on.
+    /// While false, nothing here changes a real window, app, or accessibility observer.
+    static var systemChangesAllowed = true
+
     private var observers: [pid_t: AXObserver] = [:]
     private var observedWindows: [CGWindowID: pid_t] = [:]
     private var elements: [CGWindowID: AXUIElement] = [:]
@@ -129,6 +133,7 @@ final class AXWindowService {
     }
 
     func focus(windowID: CGWindowID, pid: pid_t) {
+        guard Self.systemChangesAllowed else { return }
         if let element = elements[windowID] {
             if AXRead.bool(element, kAXMinimizedAttribute as CFString) {
                 AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
@@ -140,17 +145,19 @@ final class AXWindowService {
     }
 
     func minimize(windowID: CGWindowID) {
-        guard let element = elements[windowID] else { return }
+        guard Self.systemChangesAllowed, let element = elements[windowID] else { return }
         AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
     }
 
     func close(windowID: CGWindowID) {
+        guard Self.systemChangesAllowed else { return }
         guard let element = elements[windowID],
               let button = AXRead.element(element, kAXCloseButtonAttribute as CFString) else { return }
         AXUIElementPerformAction(button, kAXPressAction as CFString)
     }
 
     func activate(_ pid: pid_t) {
+        guard Self.systemChangesAllowed else { return }
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
         if app.isHidden { app.unhide() }
         _ = app.activate(from: .current, options: [])
@@ -171,7 +178,7 @@ final class AXWindowService {
 
     /// Pulls a window that fills the screen down to the top of the bar, the way the Dock's reserved area does.
     func fitMaximized(_ windows: [WindowInfo], occupiedHeight: CGFloat) {
-        guard Permissions.isAccessibilityTrusted else { return }
+        guard Self.systemChangesAllowed, Permissions.isAccessibilityTrusted else { return }
         let now = Date()
         for window in windows where window.isOnScreen && !window.isMinimized {
             guard let element = elements[window.windowID],
@@ -198,7 +205,8 @@ final class AXWindowService {
         }
     }
 
-    /// Frame a maximized window should use: from just under the menu bar to the top of the bar.
+    /// Lifts a maximized window so its bottom sits on the bar. The top edge stays put,
+    /// and a window that is already clear of the bar is left alone.
     func workAreaFrame(for window: CGRect, screen: NSScreen, occupiedHeight: CGFloat) -> CGRect? {
         let full = screen.frame
         let top = screen.visibleFrame.maxY
@@ -210,18 +218,13 @@ final class AXWindowService {
         let tall = window.height >= usable * 0.72
         guard reachesTop && bottomNearBar && tall else { return nil }
 
+        let overlap = barTop - window.minY
+        guard overlap > 2 else { return nil }
         var next = window
         next.origin.y = barTop
-        next.size.height = top - barTop
-        if window.minX <= full.minX + 10 && window.maxX >= full.maxX - 10 {
-            next.origin.x = full.minX
-            next.size.width = full.width
-        }
-        let moved = abs(next.minY - window.minY) > 2
-            || abs(next.height - window.height) > 2
-            || abs(next.minX - window.minX) > 2
-            || abs(next.width - window.width) > 2
-        return moved ? next : nil
+        next.size.height = window.height - overlap
+        guard next.height > 200 else { return nil }
+        return next
     }
 
     func shouldFit(_ windowID: CGWindowID, now: Date) -> Bool {
@@ -244,6 +247,7 @@ final class AXWindowService {
     }
 
     func setFrame(_ appKitFrame: CGRect, element: AXUIElement, currentCG: CGRect) {
+        guard Self.systemChangesAllowed else { return }
         guard
             let origin = AXRead.point(element, kAXPositionAttribute as CFString),
             let size = AXRead.size(element, kAXSizeAttribute as CFString)
@@ -303,6 +307,7 @@ final class AXWindowService {
     }
 
     func ensureObserving(_ pid: pid_t) {
+        guard Self.systemChangesAllowed else { return }
         guard observers[pid] == nil else { return }
         var observer: AXObserver?
         guard AXObserverCreate(pid, axObserverCallback, &observer) == .success, let observer else { return }
@@ -323,6 +328,7 @@ final class AXWindowService {
     }
 
     func observeWindow(_ element: AXUIElement, id: CGWindowID, pid: pid_t) {
+        guard Self.systemChangesAllowed else { return }
         guard observedWindows[id] == nil, let observer = observers[pid] else { return }
         let names = [
             kAXWindowMovedNotification,
