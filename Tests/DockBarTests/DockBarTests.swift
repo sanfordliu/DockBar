@@ -843,6 +843,18 @@ struct DockBarTests {
         click.mouseExited(with: hover)
         click.cursorUpdate(with: hover)
         window.orderOut(nil)
+
+        let manager = ScreenManager.shared
+        manager.stop()
+        #expect(manager.barCount == 0)
+        manager.layout(screens: [], orderFront: false)
+        #expect(manager.barCount == 0)
+        manager.handleDisplayReconfiguration(display: screen.displayID, begin: true, removed: false)
+        #expect(manager.barCount == 0)
+        panel.detach()
+        #expect(panel.contentView == nil)
+        panel.shutdown()
+        manager.stop()
     }
 
     @Test func dockHideAndAppLifecycle() {

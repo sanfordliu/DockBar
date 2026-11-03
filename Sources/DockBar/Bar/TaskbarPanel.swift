@@ -149,6 +149,10 @@ enum BarHitShape {
         _ = SkyLight.setOpaqueShape(window: Int32(window.windowNumber), region: owned)
         appliedSize[window.windowNumber] = size
     }
+
+    static func clear(_ window: NSWindow) {
+        appliedSize.removeValue(forKey: window.windowNumber)
+    }
 }
 
 /// Captures the full bar, including pixels the glass material leaves transparent,
@@ -306,6 +310,7 @@ final class TaskbarPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         ignoresMouseEvents = false
+        isReleasedWhenClosed = false
         level = BarWindows.barLevel
         collectionBehavior = BarWindows.overlayBehavior
         sharingType = .none
@@ -371,6 +376,22 @@ final class TaskbarPanel: NSPanel {
         }
         glassView?.cornerRadius = radius
         hostingView?.layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    /// Pull the glass off the window so WindowServer can tear down a display without finalizing it.
+    func detach() {
+        BarHitShape.clear(self)
+        orderOut(nil)
+        glassView?.contentView = nil
+        glassView?.removeFromSuperview()
+        glassView = nil
+        hostingView = nil
+        contentView = nil
+    }
+
+    /// Finish after the display reconfiguration has finished. The panel stays out and ARC releases it.
+    func shutdown() {
+        detach()
     }
 }
 

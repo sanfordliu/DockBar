@@ -45,4 +45,14 @@ final class BarController {
         BarCursor.claim(panel)
         BarHitShape.apply(to: panel)
     }
+
+    /// Hide the bar and drop its glass view before a display goes away.
+    func detach() {
+        panel.detach()
+    }
+
+    /// Release the panel after WindowServer has finished the display change.
+    func shutdown() {
+        panel.shutdown()
+    }
 }
