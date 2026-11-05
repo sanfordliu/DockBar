@@ -89,7 +89,7 @@ struct AppIconButton: View {
             .padding(5)
             .overlay(alignment: .bottom) {
                 Capsule()
-                    .fill(item.isActive ? Color.accentColor : Color.primary.opacity(0.72))
+                    .fill(Color.primary.opacity(item.isActive ? 1 : 0.72))
                     .frame(width: item.isActive ? 16 : 4, height: 3)
                     .padding(.bottom, 1)
                     .opacity(item.windowsOnScreen.isEmpty ? 0 : 1)
