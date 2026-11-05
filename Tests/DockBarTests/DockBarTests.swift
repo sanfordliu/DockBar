@@ -550,6 +550,25 @@ struct DockBarTests {
             isPinned: true, isRunning: true, windowsOnScreen: [shown], isActive: true
         )
         model.primaryClick(front, displayID: screen.displayID, anchor: .zero)
+        let open = window(id: 302, pid: 77, title: "Doc", height: 220, display: screen.displayID, minimized: false)
+        model.loadSnapshot(
+            apps: [
+                77: LiveApp(
+                    pid: 77, bundleID: "com.apple.TextEdit", path: textEditPath, name: "TextEdit", isHidden: false
+                ),
+            ],
+            windows: [open],
+            focusedPID: 77,
+            focusedWindowID: open.windowID
+        )
+        let unpinned = AppItem(
+            id: "com.apple.TextEdit", name: "TextEdit", path: textEditPath, bundleID: "com.apple.TextEdit", pid: 77,
+            isPinned: false, isRunning: true, windowsOnScreen: [open], isActive: true
+        )
+        model.primaryClick(unpinned, displayID: screen.displayID, anchor: .zero)
+        #expect(model.entries(for: screen.displayID).contains {
+            $0.pid == 77 && $0.windowsOnScreen.contains { $0.windowID == open.windowID && $0.isMinimized }
+        })
         let second = window(id: 301, pid: 0, title: "Other", height: 220, display: screen.displayID, minimized: false)
         let many = AppItem(
             id: "many", name: "Many", path: textEditPath, bundleID: "com.apple.TextEdit", pid: 0,

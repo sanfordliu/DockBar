@@ -48,6 +48,9 @@ final class AXWindowService {
     private var fittedAt: [CGWindowID: Date] = [:]
     private var fitStrikes: [CGWindowID: (count: Int, at: Date)] = [:]
     private var refreshTask: Task<Void, Never>?
+    /// Windows we asked to minimize. Kept until AX reports minimized so a mid-animation
+    /// refresh cannot drop them from the bar (CG already off-screen, AX not yet updated).
+    private var pendingMinimized: Set<CGWindowID> = []
 
     /// Counts real accessibility writes. Tests check that a disabled service does not increment it.
     private(set) static var mutationCount = 0
@@ -105,12 +108,20 @@ final class AXWindowService {
                 for (id, element) in elements where elementPID[id] == pid {
                     freshElements[id] = element
                     freshPIDs[id] = pid
+                    let title = AXRead.string(element, kAXTitleAttribute as CFString) ?? ""
+                    applyMinimizedState(
+                        identifier: id,
+                        pid: pid,
+                        appName: app.name,
+                        title: title,
+                        minimized: resolvedMinimized(element, id: id),
+                        byID: &byID
+                    )
                 }
                 continue
             }
             let allowSingleCandidate = copy.windows.count == 1
             for element in copy.windows {
-                let minimized = AXRead.bool(element, kAXMinimizedAttribute as CFString)
                 let title = AXRead.string(element, kAXTitleAttribute as CFString) ?? ""
                 let privateID = AXPrivate.windowID(for: element)
                 let identifier = privateID ?? match(
@@ -125,32 +136,14 @@ final class AXWindowService {
                 freshElements[identifier] = element
                 freshPIDs[identifier] = pid
                 observeWindow(element, id: identifier, pid: pid)
-                if var existing = byID[identifier] {
-                    if !title.isEmpty { existing.title = title }
-                    existing.isMinimized = minimized
-                    if minimized {
-                        existing.isOnScreen = false
-                        existing.displayID = lastDisplay[identifier] ?? existing.displayID
-                    } else if existing.isOnScreen, let displayID = existing.displayID {
-                        lastDisplay[identifier] = displayID
-                    }
-                    byID[identifier] = existing
-                } else if minimized {
-                    let siblings = byID.values.filter { $0.ownerPID == pid }
-                    let display = lastDisplay[identifier]
-                        ?? siblings.compactMap(\.displayID).first
-                        ?? NSScreen.main?.displayID
-                    byID[identifier] = WindowInfo(
-                        windowID: identifier,
-                        ownerPID: pid,
-                        title: title.isEmpty ? app.name : title,
-                        frame: .zero,
-                        cgFrame: .zero,
-                        displayID: display,
-                        isMinimized: true,
-                        isOnScreen: false
-                    )
-                }
+                applyMinimizedState(
+                    identifier: identifier,
+                    pid: pid,
+                    appName: app.name,
+                    title: title,
+                    minimized: resolvedMinimized(element, id: identifier),
+                    byID: &byID
+                )
             }
         }
         let liveIDs = Set(byID.keys).union(freshElements.keys)
@@ -185,6 +178,7 @@ final class AXWindowService {
 
     func focus(windowID: CGWindowID, pid: pid_t) {
         guard Self.systemChangesAllowed else { return }
+        pendingMinimized.remove(windowID)
         if let element = elements[windowID] {
             if AXRead.bool(element, kAXMinimizedAttribute as CFString) {
                 AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
@@ -197,7 +191,54 @@ final class AXWindowService {
 
     func minimize(windowID: CGWindowID) {
         guard Self.systemChangesAllowed, let element = elements[windowID] else { return }
+        pendingMinimized.insert(windowID)
         AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+    }
+
+    /// AX and CG disagree briefly while a window is miniaturizing. Prefer pending or AX truth.
+    private func resolvedMinimized(_ element: AXUIElement, id: CGWindowID) -> Bool {
+        let minimized = AXRead.bool(element, kAXMinimizedAttribute as CFString)
+        if minimized {
+            pendingMinimized.remove(id)
+            return true
+        }
+        return pendingMinimized.contains(id)
+    }
+
+    private func applyMinimizedState(
+        identifier: CGWindowID,
+        pid: pid_t,
+        appName: String,
+        title: String,
+        minimized: Bool,
+        byID: inout [CGWindowID: WindowInfo]
+    ) {
+        if var existing = byID[identifier] {
+            if !title.isEmpty { existing.title = title }
+            existing.isMinimized = minimized
+            if minimized {
+                existing.isOnScreen = false
+                existing.displayID = lastDisplay[identifier] ?? existing.displayID
+            } else if existing.isOnScreen, let displayID = existing.displayID {
+                lastDisplay[identifier] = displayID
+            }
+            byID[identifier] = existing
+        } else if minimized {
+            let siblings = byID.values.filter { $0.ownerPID == pid }
+            let display = lastDisplay[identifier]
+                ?? siblings.compactMap(\.displayID).first
+                ?? NSScreen.main?.displayID
+            byID[identifier] = WindowInfo(
+                windowID: identifier,
+                ownerPID: pid,
+                title: title.isEmpty ? appName : title,
+                frame: .zero,
+                cgFrame: .zero,
+                displayID: display,
+                isMinimized: true,
+                isOnScreen: false
+            )
+        }
     }
 
     func close(windowID: CGWindowID) {
@@ -421,6 +462,7 @@ final class AXWindowService {
         lastDisplay[id] = nil
         fittedAt[id] = nil
         fitStrikes[id] = nil
+        pendingMinimized.remove(id)
     }
 
     func stopObserving(_ pid: pid_t) {

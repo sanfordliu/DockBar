@@ -261,6 +261,8 @@ final class TaskbarModel {
                 focusedWindowID = window.windowID
             } else {
                 AXWindowService.shared.minimize(windowID: window.windowID)
+                // Keep the icon on the bar until refresh sees AX/CG agree on minimized.
+                markLocallyMinimized(window)
             }
             PreviewCoordinator.shared.hide()
             recompute()
@@ -848,6 +850,18 @@ final class TaskbarModel {
             return false
         }
         return true
+    }
+
+    private func markLocallyMinimized(_ window: WindowInfo) {
+        if let index = windows.firstIndex(where: { $0.windowID == window.windowID }) {
+            windows[index].isMinimized = true
+            windows[index].isOnScreen = false
+            return
+        }
+        var copy = window
+        copy.isMinimized = true
+        copy.isOnScreen = false
+        windows.append(copy)
     }
 
     private func openFinderWindow(on displayID: CGDirectDisplayID) {
