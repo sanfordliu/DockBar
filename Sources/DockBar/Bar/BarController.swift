@@ -20,9 +20,6 @@ final class BarController {
             panel.setFrame(frame, display: true)
         }
         panel.applyChrome(floating: model.settings.style == .floating)
-        if frameChanged {
-            BarHitShape.apply(to: panel)
-        }
         if orderFront {
             bringForward()
         } else {
@@ -43,16 +40,6 @@ final class BarController {
         panel.collectionBehavior = BarWindows.overlayBehavior
         panel.orderFrontRegardless()
         BarCursor.claim(panel)
-        BarHitShape.apply(to: panel)
     }
 
-    /// Hide the bar and drop its glass view before a display goes away.
-    func detach() {
-        panel.detach()
-    }
-
-    /// Release the panel after WindowServer has finished the display change.
-    func shutdown() {
-        panel.shutdown()
-    }
 }

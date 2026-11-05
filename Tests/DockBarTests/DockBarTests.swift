@@ -775,13 +775,12 @@ struct DockBarTests {
         panel.applyChrome(floating: true)
         #expect(panel.backgroundColor?.alphaComponent == 0)
         let glass = panel.contentView?.subviews.compactMap { $0 as? NSGlassEffectView }.first
-        #expect(glass?.style == .regular)
+        #expect(glass?.style == .clear)
         #expect((glass?.cornerRadius ?? 0) > 0)
         panel.applyChrome(floating: false)
         #expect(panel.backgroundColor?.alphaComponent == 0)
         #expect(glass?.cornerRadius == 0)
         panel.orderFrontRegardless()
-        BarHitShape.apply(to: panel)
         if let moved = NSEvent.mouseEvent(
             with: .mouseMoved,
             location: NSPoint(x: 10, y: 10),
@@ -851,10 +850,10 @@ struct DockBarTests {
         #expect(manager.barCount == 0)
         manager.handleDisplayReconfiguration(display: screen.displayID, begin: true, removed: false)
         #expect(manager.barCount == 0)
-        panel.detach()
-        #expect(panel.contentView == nil)
-        panel.shutdown()
+        manager.handleDisplayReconfiguration(display: screen.displayID, begin: false, removed: false)
         manager.stop()
+        #expect(manager.barCount == 0)
+        panel.orderOut(nil)
     }
 
     @Test func dockHideAndAppLifecycle() {

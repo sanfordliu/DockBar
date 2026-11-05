@@ -8,9 +8,10 @@ final class ScreenManager: NSObject {
     private var bars: [CGDirectDisplayID: BarController] = [:]
     private var cursorTimer: Timer?
     private var restoreWork: DispatchWorkItem?
-    /// Bars detached during a display reconfiguration, held until WindowServer finishes tearing down the old screens.
+    private var retireCleanupWork: DispatchWorkItem?
+    /// Bars for displays that went away. Kept alive past WindowServer's device teardown.
     private var retiring: [BarController] = []
-    private var closedForCurrentReconfiguration = false
+    private var reconfiguring = false
     private static var displayCallbackInstalled = false
 
     /// How many bars are currently shown. Used by tests.
@@ -39,11 +40,17 @@ final class ScreenManager: NSObject {
     }
 
     @objc func layout() {
+        // Model refresh must not create glass panels while WindowServer is still
+        // tearing devices down (reconnect crashes in SLSDeviceDestroy otherwise).
+        if reconfiguring {
+            scheduleRestore()
+            return
+        }
         layout(screens: NSScreen.screens, orderFront: false)
     }
 
     @objc private func screensChanged() {
-        if closedForCurrentReconfiguration {
+        if reconfiguring {
             scheduleRestore()
             return
         }
@@ -56,15 +63,18 @@ final class ScreenManager: NSObject {
 
     /// Rebuilds bars for the given screens. An empty list leaves the current bars alone so a
     /// mid-reconfiguration blank `NSScreen.screens` cannot wipe the only remaining bar.
-    func layout(screens: [NSScreen], orderFront: Bool) {
+    func layout(screens: [NSScreen], orderFront: Bool, forceDuringReconfiguration: Bool = false) {
+        if reconfiguring && !forceDuringReconfiguration {
+            scheduleRestore()
+            return
+        }
         guard !screens.isEmpty else {
             Log.info("Screen list empty; keeping \(bars.count) bar(s)")
             return
         }
-        finishRetiring()
         let ids = Set(screens.map(\.displayID))
         for id in bars.keys where !ids.contains(id) {
-            retireBar(for: id)
+            softRetire(for: id)
         }
         for screen in screens {
             let id = screen.displayID
@@ -81,16 +91,11 @@ final class ScreenManager: NSObject {
     /// Called from the CoreGraphics display reconfiguration callback on the main thread.
     func handleDisplayReconfiguration(display: CGDirectDisplayID, begin: Bool, removed: Bool) {
         if begin {
-            if !closedForCurrentReconfiguration {
-                closedForCurrentReconfiguration = true
-                PreviewCoordinator.shared.hide()
-                closeAllBars()
-                Log.info("Display change began; closed bars before screens tear down")
-            }
+            hideBarsForDisplayChange()
             return
         }
         if removed {
-            retireBar(for: display)
+            softRetire(for: display)
         }
         scheduleRestore()
     }
@@ -141,50 +146,83 @@ final class ScreenManager: NSObject {
     func stop() {
         restoreWork?.cancel()
         restoreWork = nil
-        closedForCurrentReconfiguration = false
+        retireCleanupWork?.cancel()
+        retireCleanupWork = nil
+        reconfiguring = false
         cursorTimer?.invalidate()
         cursorTimer = nil
-        closeAllBars()
-        finishRetiring()
+        for bar in bars.values {
+            bar.panel.orderOut(nil)
+        }
+        bars.removeAll()
+        // Drop retiring on the next turn so we are not inside WindowServer's teardown.
+        let leftover = retiring
+        retiring = []
+        DispatchQueue.main.async {
+            for bar in leftover {
+                bar.panel.orderOut(nil)
+            }
+        }
     }
 
     @objc private func enforceCursor() {
         resetCursorIfOverBar()
     }
 
-    private func closeAllBars() {
-        let dying = Array(bars.values)
-        bars.removeAll()
-        for bar in dying {
-            bar.detach()
-            retiring.append(bar)
+    /// On the first begin wave, abandon every bar panel with orderOut only.
+    /// Do not call SLSSetWindowOpaqueShape here — that crashes during begin
+    /// (`__CGSWindowSetOpaqueShape_block_invoke`). Later waves orderOut leftovers.
+    private func hideBarsForDisplayChange() {
+        let already = reconfiguring
+        reconfiguring = true
+        PreviewCoordinator.shared.hide()
+        if !already {
+            let dying = Array(bars.values)
+            bars.removeAll()
+            for bar in dying {
+                // orderOut only — do not tear down glass or call SkyLight during begin.
+                bar.panel.orderOut(nil)
+                retiring.append(bar)
+            }
+            scheduleRetireCleanup()
+            Log.info("Display change began; abandoned \(dying.count) bar(s)")
+            return
+        }
+        for bar in bars.values {
+            bar.panel.orderOut(nil)
         }
     }
 
-    private func retireBar(for id: CGDirectDisplayID) {
+    private func softRetire(for id: CGDirectDisplayID) {
         guard let bar = bars.removeValue(forKey: id) else { return }
-        bar.detach()
+        bar.panel.orderOut(nil)
         retiring.append(bar)
+        scheduleRetireCleanup()
     }
 
-    private func finishRetiring() {
-        let done = retiring
-        retiring = []
-        for bar in done {
-            bar.shutdown()
+    private func scheduleRetireCleanup() {
+        retireCleanupWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Drop retains only. Do not message the panels — their CGS windows may already
+            // have been finalized with the old display devices.
+            self.retiring = []
         }
+        retireCleanupWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: work)
     }
 
     private func scheduleRestore() {
         restoreWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.closedForCurrentReconfiguration = false
-            self.layout(screens: NSScreen.screens, orderFront: true)
+            self.reconfiguring = false
+            self.layout(screens: NSScreen.screens, orderFront: true, forceDuringReconfiguration: true)
             Log.info("Bars ready on \(NSScreen.screens.count) screen(s) after display change")
         }
         restoreWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        // Connect brings monitors up in multiple waves; wait for them to settle.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
     private func installDisplayCallback() {
@@ -200,19 +238,21 @@ final class ScreenManager: NSObject {
     private nonisolated static let displayCallback: CGDisplayReconfigurationCallBack = { display, flags, _ in
         let begin = flags.contains(.beginConfigurationFlag)
         let removed = flags.contains(.removeFlag)
-        let deliver = {
-            MainActor.assumeIsolated {
-                ScreenManager.shared.handleDisplayReconfiguration(
-                    display: display,
-                    begin: begin,
-                    removed: removed
-                )
-            }
+        let fromMain = Thread.isMainThread
+        let run: @MainActor @Sendable () -> Void = {
+            ScreenManager.shared.handleDisplayReconfiguration(
+                display: display,
+                begin: begin,
+                removed: removed
+            )
         }
-        if Thread.isMainThread {
-            deliver()
+        if fromMain {
+            MainActor.assumeIsolated(run)
+        } else if begin {
+            // Must hide before WindowServer tears the device down.
+            DispatchQueue.main.sync { MainActor.assumeIsolated(run) }
         } else {
-            DispatchQueue.main.sync(execute: deliver)
+            DispatchQueue.main.async { MainActor.assumeIsolated(run) }
         }
     }
 }

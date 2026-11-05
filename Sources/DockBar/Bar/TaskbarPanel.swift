@@ -99,24 +99,12 @@ enum BarCursor {
     }
 }
 
-@_silgen_name("CGSNewRegionWithRect")
-private func CGSNewRegionWithRect(_ rect: UnsafePointer<CGRect>, _ region: UnsafeMutablePointer<CFTypeRef?>) -> Int32
-
 @MainActor
 private enum SkyLight {
     nonisolated(unsafe) static let handle: UnsafeMutableRawPointer? = dlopen(
         "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
         RTLD_LAZY
     )
-
-    static func setOpaqueShape(window: Int32, region: CFTypeRef) -> Int32 {
-        guard let handle,
-              let connection = dlsym(handle, "SLSMainConnectionID"),
-              let setter = dlsym(handle, "SLSSetWindowOpaqueShape") else { return -1 }
-        let connectionID = unsafeBitCast(connection, to: (@convention(c) () -> Int32).self)()
-        let set = unsafeBitCast(setter, to: (@convention(c) (Int32, Int32, CFTypeRef) -> Int32).self)
-        return set(connectionID, window, region)
-    }
 
     static func allowBackgroundCursor() {
         guard let handle,
@@ -128,30 +116,6 @@ private enum SkyLight {
             to: (@convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32).self
         )
         _ = set(connectionID, connectionID, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
-    }
-}
-
-@MainActor
-enum BarHitShape {
-    private static var appliedSize: [Int: CGSize] = [:]
-
-    /// The top resize strip stays out of the opaque region so the window behind the bar can be resized.
-    static func apply(to window: NSWindow) {
-        guard window.windowNumber > 0 else { return }
-        let size = window.frame.size
-        if appliedSize[window.windowNumber] == size { return }
-        var rect = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - BarCursor.resizeLine))
-        var region: CFTypeRef?
-        let made = CGSNewRegionWithRect(&rect, &region)
-        guard made == 0, let region else { return }
-        // CGSNewRegionWithRect returns a +1 region. Consume that retain so ARC releases it.
-        let owned = Unmanaged<CFTypeRef>.passUnretained(region).takeRetainedValue()
-        _ = SkyLight.setOpaqueShape(window: Int32(window.windowNumber), region: owned)
-        appliedSize[window.windowNumber] = size
-    }
-
-    static func clear(_ window: NSWindow) {
-        appliedSize.removeValue(forKey: window.windowNumber)
     }
 }
 
@@ -345,7 +309,7 @@ final class TaskbarPanel: NSPanel {
     func install<Content: View>(_ hosting: ClearHostingView<Content>) {
         guard let content = contentView else { return }
         let glass = NSGlassEffectView()
-        glass.style = .regular
+        glass.style = .clear
         glass.cornerRadius = 0
         glass.translatesAutoresizingMaskIntoConstraints = false
         hosting.wantsLayer = true
@@ -363,7 +327,7 @@ final class TaskbarPanel: NSPanel {
         ])
     }
 
-    /// System glass, the same kind the Dock uses. The floating bar is a capsule; the full-width bar is a shelf.
+    /// Clear system glass, closer to the native Dock. The floating bar is a capsule; the full-width bar is a shelf.
     func applyChrome(floating: Bool) {
         backgroundColor = .clear
         hasShadow = floating
@@ -378,21 +342,6 @@ final class TaskbarPanel: NSPanel {
         hostingView?.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
-    /// Pull the glass off the window so WindowServer can tear down a display without finalizing it.
-    func detach() {
-        BarHitShape.clear(self)
-        orderOut(nil)
-        glassView?.contentView = nil
-        glassView?.removeFromSuperview()
-        glassView = nil
-        hostingView = nil
-        contentView = nil
-    }
-
-    /// Finish after the display reconfiguration has finished. The panel stays out and ARC releases it.
-    func shutdown() {
-        detach()
-    }
 }
 
 @MainActor
